@@ -1,0 +1,31 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.claude/
+
+# 依赖
+node_modules/
+vendor/
+
+# 构建产物
+dist/
+build/
+target/
+tsconfig.tsbuildinfo
+
+# 环境变量
+.env
+.env.local
+
+# 日志
+*.log
+logs/
+
+# 缓存
+*.tsbuildinfo
+.data
