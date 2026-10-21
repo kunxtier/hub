@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/kunxtier-core", "crates/kunxtier-relay", "crates/kunxtier-cli"]
+members = [
+    "crates/kunxtier-core",
+    "crates/kunxtier-relay",
+    "crates/kunxtier-cli",
+    "crates/kunxtier-node",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,6 +33,12 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+# WG 用户态引擎: gotatun 0.7.2 起 MSRV 1.95 超出当前工具链 (1.90), 升级工具链前锁定 0.7.1。
+# default-features 关闭以排除 aws-lc-rs, ring 后端与 rustls 选型对齐。
+gotatun = { version = "=0.7.1", default-features = false, features = ["ring", "device"] }
+tun-rs = { version = "2.8", features = ["async"] }
+# 与 gotatun 内 ipnetwork 同版本, 保证 Peer allowed_ips 类型一致
+ipnetwork = "0.21"
 # 集成测试侧: TLS WS 客户端 (client_async 走自带 TLS 流, 不启用其 TLS feature)
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 # feature 与 workspace rustls 对齐 (ring), 避免 aws-lc-rs 进入特性合成

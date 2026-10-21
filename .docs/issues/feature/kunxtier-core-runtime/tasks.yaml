@@ -21,7 +21,7 @@ tasks:
     owner: "SRV"
   - id: "T06"
     title: "kunxtier-node TUN 与 WireGuard 用户态引擎接入 (gotatun/boringtun + tun-rs 选型锁定)"
-    status: "todo"
+    status: "done"
     owner: "NODE"
   - id: "T07"
     title: "kunxtier-node 打洞与路径策略: STUN 探测、并发打洞、超时回落、节点级强制中继"

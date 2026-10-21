@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-21, ik-advance T05)
+## 当前实际结构 (2026-10-21, ik-advance T06)
 
 ```text
 hub/
@@ -51,7 +51,9 @@ hub/
 │       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig)
 │       ├── kunxtier-relay/       # 核心中继: store + server + init + cert + ratelimit + client_tls
 │       │                         #   + signaling (信令 WS) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
-│       └── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令
+│       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令
+│       └── kunxtier-node/        # 节点数据面: engine (WG 引擎装配 + 运行时 peer 管理)
+│                                 #   + tun (tun-rs 适配 IpSend/IpRecv) + identity (WG 密钥对)
 ├── CLAUDE.md                     # 已创建
 └── web/                          # 未建 (控制台前端阶段落地)
 ```
@@ -66,5 +68,10 @@ hub/
 - 2026-10-21 (T05): 卫星无状态目录——证书每次启动临时生成, 指纹随注册上报并经中继列表分发; 节点按条目指纹固定校验, 免去卫星证书分发工序。
 - 2026-10-21 (T05): 中继列表顺序为协议语义——卫星在前 (按地址稳定序), 核心内置恒在末位兜底; 内置条目 addr 为空串时表示 "节点已连接的核心自身" (通配监听且未配 advertise 时出现)。
 - 2026-10-21 (T05): 卫星进程拆 start (返回实际监听地址与句柄) / run (CLI 前台) 两级, 供集成测试以真实进程形态起停。
+- 2026-10-21 (T06 选型锁定): WG 用户态引擎用 gotatun 0.7.1 (Mullvad 维护的 boringtun fork), 以 `=0.7.1` 精确锁定——0.7.2 起 MSRV 1.95 超出当前工具链 (rustc 1.90), 工具链升级后再评估抬升; feature 取 ring + device (default-features 关闭排除 aws-lc-rs, 与 rustls 选型同源)。退路 boringtun 0.7.1 (Cloudflare) 保持在位未启用。
+- 2026-10-21 (T06): TUN 用 tun-rs 2.8 (async); 不启用 gotatun 的 tun feature (其绑定的是另一 tun crate), 由 kunxtier-node 自实现 gotatun IpSend/IpRecv 适配, 设备创建 / 地址 / MTU 归 kunxtier 自持 (T08 路由与冲突检测直接可用)。
+- 2026-10-21 (T06): gotatun 0.7.1 运行时加 peer 不触发连接建立 (reconfigure 只认密钥 / 端口变更 / 清空), 引擎装配时不设端口, 首次 sync_peers 经 set_listen_port 0→P 变更落地 UDP 绑定; listen_port 拒绝 0 (固定端口是打洞与候选上报前提)。
+- 2026-10-21 (T06): TUN MTU 先取保守值 1280 (DEFAULT_MTU), FR-16 的最坏路径精推与大包验证随 T08 落地。
+- 2026-10-21 (T06 测试形态): 引擎级 e2e 免特权——TUN 侧用 gotatun 通道 (UDP 语义), UDP 侧为真实 127.0.0.1 socket, 双引擎真实 noise 握手与双向互通; 真实 TUN 设备冒烟为 tun 模块 #[ignore] 用例 (需 root, 手动执行)。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

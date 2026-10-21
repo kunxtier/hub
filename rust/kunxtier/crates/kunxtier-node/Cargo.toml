@@ -1,0 +1,16 @@
+[package]
+name = "kunxtier-node"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gotatun.workspace = true
+tun-rs.workspace = true
+ipnetwork.workspace = true
+tokio.workspace = true
+rand.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
