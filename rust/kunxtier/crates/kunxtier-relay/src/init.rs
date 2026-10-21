@@ -52,8 +52,8 @@ pub fn init(cfg: &RelayConfig) -> Result<InitOutput> {
         std::fs::set_permissions(cfg.cert_path(), std::fs::Permissions::from_mode(0o644))?;
     }
 
-    let base = kunxtier_core::address::nth_network_base(0)
-        .map_err(|e| Error::Usage(e.to_string()))?;
+    let base =
+        kunxtier_core::address::nth_network_base(0).map_err(|e| Error::Usage(e.to_string()))?;
     let admin = store.bootstrap_default(base)?;
 
     tracing::info!(data_dir = %cfg.data_dir.display(), "核心中继初始化完成");

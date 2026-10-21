@@ -13,7 +13,7 @@ tasks:
     owner: "SRV"
   - id: "T04"
     title: "kunxtier-relay 信令 WS: 节点凭证挑战应答、在线状态、节点表与密钥分发、打洞信令转发、限速防护"
-    status: "todo"
+    status: "done"
     owner: "SRV"
   - id: "T05"
     title: "kunxtier-relay 转发双模式: 核心内置中继 + 卫星纯转发 (relay 令牌注册/列表分发/断连摘除)"

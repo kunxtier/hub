@@ -1,0 +1,21 @@
+#!/bin/sh
+# pre-commit: 秒级红线检查。
+# 全量质量闸门 (clippy / test) 走 cargo make 与提交流程, 不在钩子内重复。
+set -e
+
+# 状态目录与敏感文件不得入库 (安全红线: TLS 私钥 / SQLite / 凭证)
+blocked=$(git diff --cached --name-only | grep -E '(^|/)kunxtier-state/|\.pem$|\.key$|\.db$' || true)
+if [ -n "$blocked" ]; then
+    echo "pre-commit: 检测到敏感/状态文件, 禁止提交:" >&2
+    echo "$blocked" >&2
+    echo "  确属误报可 git commit --no-verify 跳过" >&2
+    exit 1
+fi
+
+# rust 格式检查 (不编译, 秒级; 无工具链则跳过)
+if command -v cargo >/dev/null 2>&1 && cargo fmt --version >/dev/null 2>&1; then
+    if ! (cd rust/kunxtier && cargo fmt --all -- --check); then
+        echo "pre-commit: rust 格式不符, 请在 rust/kunxtier 下执行 cargo fmt" >&2
+        exit 1
+    fi
+fi

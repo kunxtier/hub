@@ -78,7 +78,5 @@ pub fn pinning_agent(fingerprint: &str) -> ureq::Agent {
             fingerprint: fingerprint.to_string(),
         }))
         .with_no_client_auth();
-    ureq::AgentBuilder::new()
-        .tls_config(Arc::new(tls))
-        .build()
+    ureq::AgentBuilder::new().tls_config(Arc::new(tls)).build()
 }

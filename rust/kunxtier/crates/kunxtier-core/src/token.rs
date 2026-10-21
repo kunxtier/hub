@@ -72,6 +72,30 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+// ---- 信令挑战应答 (协议形态: nonce + sha256 摘要, 2026-10-21 裁决) ----
+
+/// 服务端挑战 nonce: 32 字节 CSPRNG。
+pub fn generate_nonce() -> [u8; 32] {
+    let mut b = [0u8; 32];
+    rand::rng().fill_bytes(&mut b);
+    b
+}
+
+/// 摘要 = sha256(nonce || credential_hash)。
+/// credential_hash 为 sha256(凭证明文): 客户端本地可算, 服务端为库中唯一存储形态,
+/// 双方均不传输明文或哈希本体 (与 HTTP Digest 同构, 见 nfr-kunxtier-security)。
+pub fn challenge_digest(nonce: &[u8], credential_hash: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(nonce);
+    h.update(credential_hash);
+    h.finalize().into()
+}
+
+/// 客户端侧封装: 以凭证明文计算挑战应答。
+pub fn challenge_answer(nonce: &[u8], credential_plain: &str) -> [u8; 32] {
+    challenge_digest(nonce, &hash(credential_plain))
+}
+
 // ------------------------------ 单元测试 --------------------------------
 
 #[cfg(test)]
@@ -115,5 +139,24 @@ mod tests {
     fn looks_valid_rejects_truncated() {
         assert!(looks_valid(&generate(Kind::RelayToken)));
         assert!(!looks_valid("kxt_relay_short"));
+    }
+
+    #[test]
+    fn challenge_answer_matches_digest_of_hash() {
+        let nonce = generate_nonce();
+        let credential = generate(Kind::NodeCredential);
+        // 客户端应答 = 服务端以库存哈希计算的期望值
+        let answer = challenge_answer(&nonce, &credential);
+        let expect = challenge_digest(&nonce, &hash(&credential));
+        assert!(ct_eq(&answer, &expect));
+    }
+
+    #[test]
+    fn challenge_digest_varies_with_nonce() {
+        let h = hash("kxt_nid_fixed");
+        let a = challenge_digest(&generate_nonce(), &h);
+        let b = challenge_digest(&generate_nonce(), &h);
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
     }
 }

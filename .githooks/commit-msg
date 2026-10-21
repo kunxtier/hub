@@ -1,0 +1,23 @@
+#!/bin/sh
+# commit-msg: 提交信息规范 (conventional 前缀) 与 emoji 红线。
+set -e
+msg_file="$1"
+head=$(sed -n 1p "$msg_file")
+
+# merge / revert 提交放行
+if printf '%s\n' "$head" | grep -qE '^(Merge|Revert) '; then
+    exit 0
+fi
+
+# 首行: conventional 前缀 (可带 scope), 冒号后接非空正文
+if ! printf '%s\n' "$head" | grep -qE '^(feat|fix|docs|style|refactor|test|chore|perf|build|ci|revert)(\([a-zA-Z0-9_-]+\))?: [^ ]'; then
+    echo "commit-msg: 首行需 conventional 前缀, 如 'feat: xxx' 或 'fix(core): xxx'" >&2
+    echo "  当前首行: $head" >&2
+    exit 1
+fi
+
+# emoji 红线 (输出约束): 覆盖常见表情与符号区段
+if ! perl -CSD -ne 'if (/[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}]/) { exit 1 }' "$msg_file"; then
+    echo "commit-msg: 提交信息包含 emoji, 项目输出约束禁止" >&2
+    exit 1
+fi

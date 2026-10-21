@@ -71,3 +71,4 @@ kunxtier (轻量 P2P 虚拟组网, ZeroTier / EasyTier 平替) 规划已完成: 
 
 - 2026-10-20 (ik-advance --init): 交付控制面登记闭环。rust/kunxtier workspace (core / relay / cli 三 crate) 与根 CLAUDE.md 落地; `relay --init` (自签证书 / admin 凭证 / 默认网络 / key 0600)、`relay` 运行 (HTTPS 管理 API)、admin 全套管理命令 (含 user disable)、节点一次性令牌注册 (IP 分配 + 节点凭证签发)、注册与认证限速、`relay backup`。28 项测试通过 (单元 25 + 集成 3), 二进制冒烟通过。T01-T03 done; 下一步 T04 信令 WS (节点凭证挑战应答)。
 - 实现期修复的两个缺陷 (测试守恒捕获): next_ip 漏递增导致 IP 重复分配; 节点同名唯一约束未排除已移除行, 挡住 FR-17 的同名重注册。
+- 2026-10-21 (ik-commit): 交付信令 WS 切片。`/ws/signal` 节点凭证挑战应答 (nonce + sha256 摘要, 明文与哈希均不传输, 2026-10-21 协议裁决)、内存在线注册表与上下线秒级广播 (FR-5)、节点表与对端公钥分发、打洞信令同网定向转发、心跳 10s / 空闲 30s (AuthOk 下发)、建连限速与消息大小上限 (NFR-9); admin 移除节点 / 禁用用户即踢线 (存量凭证实时吊销), 节点列表并入在线态。配套仓库根 Makefile 与 git hooks (`make hooks` 装载)。T04 done; 下一步 T05 转发双模式。

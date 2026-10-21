@@ -1,4 +1,4 @@
-//! Description: HTTPS 服务: 管理区 (admin 鉴权) + 节点注册区 (一次性令牌 + 限速)。
+//! Description: HTTPS 服务: 管理区 (admin 鉴权) + 节点注册区 (一次性令牌 + 限速) + 信令 WS。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-20
@@ -19,12 +19,12 @@ use serde::Deserialize;
 use kunxtier_core::address;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::{
-    ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest,
-    IssueTokenResponse, NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse,
-    RemoveNodeRequest,
+    ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest, IssueTokenResponse,
+    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest,
 };
 
 use crate::ratelimit::RateLimiter;
+use crate::signaling::OnlineRegistry;
 use crate::store::Store;
 use crate::Error;
 
@@ -34,6 +34,10 @@ pub struct AppState {
     register_limiter: RateLimiter,
     /// admin 认证失败计数: 20 次 / 分钟 / 源。
     admin_limiter: RateLimiter,
+    /// 信令 WS 建连限速 (成功也计数): 20 次 / 分钟 / 源 (NFR-9)。
+    pub(crate) ws_limiter: RateLimiter,
+    /// 在线节点注册表 (信令会话持有, admin 列表合并在线态)。
+    pub(crate) online: OnlineRegistry,
 }
 
 impl AppState {
@@ -42,6 +46,8 @@ impl AppState {
             store: Mutex::new(store),
             register_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             admin_limiter: RateLimiter::new(20, Duration::from_secs(60)),
+            ws_limiter: RateLimiter::new(20, Duration::from_secs(60)),
+            online: OnlineRegistry::new(),
         }
     }
 
@@ -49,7 +55,7 @@ impl AppState {
     ///
     /// unwrap 理由: 锁中毒意味着持锁线程在临界区内 panic, 连接状态已不可信,
     /// 快速失败优于带病继续服务。
-    fn lock_store(&self) -> MutexGuard<'_, Store> {
+    pub(crate) fn lock_store(&self) -> MutexGuard<'_, Store> {
         self.store.lock().unwrap()
     }
 }
@@ -125,13 +131,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/node/register", post(register))
-        .route("/api/admin/networks", get(list_networks).post(create_network))
+        .route(
+            "/api/admin/networks",
+            get(list_networks).post(create_network),
+        )
         .route("/api/admin/users", post(create_user))
         .route("/api/admin/users/disable", post(disable_user))
         .route("/api/admin/tokens", post(issue_token))
         .route("/api/admin/tokens/{id}/revoke", post(revoke_token))
         .route("/api/admin/nodes", get(list_nodes))
         .route("/api/admin/nodes/remove", post(remove_node))
+        .route("/ws/signal", get(crate::signaling::ws_handler))
         .with_state(state)
 }
 
@@ -161,9 +171,10 @@ async fn register(
     if !state.register_limiter.check(addr.ip()) {
         return Err(ApiError::too_many());
     }
-    let (network, ip, node_credential) = state
-        .lock_store()
-        .consume_node_token(&req.token, &req.name, &req.wg_public_key)?;
+    let (network, ip, node_credential) =
+        state
+            .lock_store()
+            .consume_node_token(&req.token, &req.name, &req.wg_public_key)?;
     // 注意: 不记录任何令牌 / 凭证明文 (NFR-4)
     tracing::info!(node = %req.name, network = %network, ip = %ip, "节点注册成功");
     Ok(Json(RegisterResponse {
@@ -201,9 +212,7 @@ async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&state, addr.ip(), &headers)?;
-    let id = state
-        .lock_store()
-        .create_user(&req.network, &req.name)?;
+    let id = state.lock_store().create_user(&req.network, &req.name)?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -214,9 +223,14 @@ async fn disable_user(
     Json(req): Json<CreateUserRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&state, addr.ip(), &headers)?;
-    state
+    state.lock_store().disable_user(&req.network, &req.name)?;
+    // 属主禁用即吊销其名下存量节点凭证: 在线信令立即断开 (NFR-3 配套)
+    let nodes = state
         .lock_store()
-        .disable_user(&req.network, &req.name)?;
+        .node_names_of_user(&req.network, &req.name)?;
+    for name in nodes {
+        state.online.kick(&req.network, &name);
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -229,13 +243,14 @@ async fn issue_token(
     require_admin(&state, addr.ip(), &headers)?;
     let kind = req.kind.as_deref().unwrap_or("node");
     let ttl = req.ttl_secs.unwrap_or(86400);
-    let (id, token) = state.lock_store().issue_token(
-        &req.network,
-        req.user.as_deref(),
-        kind,
-        ttl,
-    )?;
-    Ok(Json(IssueTokenResponse { token_id: id, token }))
+    let (id, token) =
+        state
+            .lock_store()
+            .issue_token(&req.network, req.user.as_deref(), kind, ttl)?;
+    Ok(Json(IssueTokenResponse {
+        token_id: id,
+        token,
+    }))
 }
 
 async fn revoke_token(
@@ -265,7 +280,14 @@ async fn list_nodes(
     Query(q): Query<NodesQuery>,
 ) -> ApiResult<Json<Vec<NodeInfo>>> {
     require_admin(&state, addr.ip(), &headers)?;
-    Ok(Json(state.lock_store().list_nodes(q.network.as_deref())?))
+    let online = state.online.online_by_network();
+    let mut nodes = state.lock_store().list_nodes(q.network.as_deref())?;
+    for n in &mut nodes {
+        n.online = online
+            .get(&n.network)
+            .is_some_and(|set| set.contains(&n.name));
+    }
+    Ok(Json(nodes))
 }
 
 async fn remove_node(
@@ -276,6 +298,8 @@ async fn remove_node(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&state, addr.ip(), &headers)?;
     state.lock_store().remove_node(&req.network, &req.name)?;
+    // 节点移除即凭证吊销: 在线信令立即断开并广播下线
+    state.online.kick(&req.network, &req.name);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -284,12 +308,9 @@ pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let store = Store::open(&cfg.db_path())?;
     let state = Arc::new(AppState::new(store));
-    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-        cfg.cert_path(),
-        cfg.key_path(),
-    )
-    .await
-    .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
+        .await
+        .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;
     let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
     tracing::info!(listen = %cfg.listen, "核心中继启动");
     axum_server::bind_rustls(cfg.listen, tls)

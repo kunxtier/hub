@@ -22,5 +22,8 @@ pub fn generate_self_signed() -> Result<SelfSignedCert, rcgen::Error> {
 
 /// sha256(DER) 的小写 hex, 作为分发与固定的指纹。
 pub fn fingerprint(der: &[u8]) -> String {
-    Sha256::digest(der).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

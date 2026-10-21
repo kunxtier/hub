@@ -81,7 +81,10 @@ mod tests {
     #[test]
     fn parse_cidr_accepts_pool_16() {
         assert_eq!(parse_cidr("100.64.0.0/16").unwrap(), POOL_BASE);
-        assert_eq!(parse_cidr("100.127.0.0/16").unwrap(), (127 << 16) | (100 << 24));
+        assert_eq!(
+            parse_cidr("100.127.0.0/16").unwrap(),
+            (127 << 16) | (100 << 24)
+        );
     }
 
     #[test]

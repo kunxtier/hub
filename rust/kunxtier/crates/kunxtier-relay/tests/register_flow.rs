@@ -81,38 +81,65 @@ async fn registration_loop_and_guards() {
     let auth = format!("Bearer {admin}");
 
     // 建用户与一次性令牌
-    let (s, _) = post(&agent, &format!("{base}/api/admin/users"), Some(&auth),
-        json!({"network": "default", "name": "alice"}));
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/admin/users"),
+        Some(&auth),
+        json!({"network": "default", "name": "alice"}),
+    );
     assert_eq!(s, 200);
 
-    let (s, tok) = post(&agent, &format!("{base}/api/admin/tokens"), Some(&auth),
-        json!({"network": "default", "user": "alice"}));
+    let (s, tok) = post(
+        &agent,
+        &format!("{base}/api/admin/tokens"),
+        Some(&auth),
+        json!({"network": "default", "user": "alice"}),
+    );
     assert_eq!(s, 200);
     let token = tok["token"].as_str().unwrap().to_string();
     assert!(token.starts_with("kxt_node_"));
 
     // 节点注册: 拿到网络 / IP / 节点凭证
-    let (s, reg) = post(&agent, &format!("{base}/api/node/register"), None,
-        json!({"token": token, "name": "laptop", "wg_public_key": wg_key_b64()}));
+    let (s, reg) = post(
+        &agent,
+        &format!("{base}/api/node/register"),
+        None,
+        json!({"token": token, "name": "laptop", "wg_public_key": wg_key_b64()}),
+    );
     assert_eq!(s, 200);
     assert_eq!(reg["network"], "default");
     assert_eq!(reg["ip"], "100.64.0.1");
-    assert!(reg["node_credential"].as_str().unwrap().starts_with("kxt_nid_"));
+    assert!(reg["node_credential"]
+        .as_str()
+        .unwrap()
+        .starts_with("kxt_nid_"));
 
     // 一次性令牌: 复用被拒
-    let (s, _) = post(&agent, &format!("{base}/api/node/register"), None,
-        json!({"token": token, "name": "laptop2", "wg_public_key": wg_key_b64()}));
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/node/register"),
+        None,
+        json!({"token": token, "name": "laptop2", "wg_public_key": wg_key_b64()}),
+    );
     assert_eq!(s, 400);
 
     // 同名注册被拒 (FR-17)
-    let (_, tok2) = post(&agent, &format!("{base}/api/admin/tokens"), Some(&auth),
-        json!({"network": "default", "user": "alice"}));
-    let (s, _) = post(&agent, &format!("{base}/api/node/register"), None,
+    let (_, tok2) = post(
+        &agent,
+        &format!("{base}/api/admin/tokens"),
+        Some(&auth),
+        json!({"network": "default", "user": "alice"}),
+    );
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/node/register"),
+        None,
         json!({
             "token": tok2["token"].as_str().unwrap(),
             "name": "laptop",
             "wg_public_key": wg_key_b64()
-        }));
+        }),
+    );
     assert_eq!(s, 400);
 
     // admin 列表可见节点与属主标注
@@ -122,16 +149,28 @@ async fn registration_loop_and_guards() {
     assert_eq!(nodes[0]["owner"], "alice");
 
     // 禁用用户后其名下令牌签发被拒 (FR-1)
-    let (s, _) = post(&agent, &format!("{base}/api/admin/users/disable"), Some(&auth),
-        json!({"network": "default", "name": "alice"}));
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/admin/users/disable"),
+        Some(&auth),
+        json!({"network": "default", "name": "alice"}),
+    );
     assert_eq!(s, 200);
-    let (s, _) = post(&agent, &format!("{base}/api/admin/tokens"), Some(&auth),
-        json!({"network": "default", "user": "alice"}));
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/admin/tokens"),
+        Some(&auth),
+        json!({"network": "default", "user": "alice"}),
+    );
     assert_eq!(s, 400);
 
     // 移除节点后列表为空
-    let (s, _) = post(&agent, &format!("{base}/api/admin/nodes/remove"), Some(&auth),
-        json!({"network": "default", "name": "laptop"}));
+    let (s, _) = post(
+        &agent,
+        &format!("{base}/api/admin/nodes/remove"),
+        Some(&auth),
+        json!({"network": "default", "name": "laptop"}),
+    );
     assert_eq!(s, 200);
     let (s, nodes) = get(&agent, &format!("{base}/api/admin/nodes"), Some(&auth));
     assert_eq!(s, 200);
@@ -159,8 +198,11 @@ async fn admin_auth_and_register_rate_limit() {
     assert_eq!(s, 401);
 
     // 错误凭证 → 401
-    let (s, _) = get(&agent, &format!("{base}/api/admin/networks"),
-        Some("Bearer kxt_admin_wrong"));
+    let (s, _) = get(
+        &agent,
+        &format!("{base}/api/admin/networks"),
+        Some("Bearer kxt_admin_wrong"),
+    );
     assert_eq!(s, 401);
 
     // 正确凭证可见默认网络
@@ -172,8 +214,12 @@ async fn admin_auth_and_register_rate_limit() {
     // 注册端点限速: 连续垃圾令牌最终 429 (10 次 / 分钟 / 源)
     let mut hit_429 = false;
     for i in 0..12 {
-        let (s, _) = post(&agent, &format!("{base}/api/node/register"), None,
-            json!({"token": "kxt_node_garbage", "name": format!("x{i}"), "wg_public_key": wg_key_b64()}));
+        let (s, _) = post(
+            &agent,
+            &format!("{base}/api/node/register"),
+            None,
+            json!({"token": "kxt_node_garbage", "name": format!("x{i}"), "wg_public_key": wg_key_b64()}),
+        );
         if s == 429 {
             hit_429 = true;
             break;

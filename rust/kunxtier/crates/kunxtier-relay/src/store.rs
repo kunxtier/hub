@@ -13,7 +13,7 @@ use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use kunxtier_core::address;
-use kunxtier_core::protocol::{NetworkInfo, NodeInfo};
+use kunxtier_core::protocol::{NetworkInfo, NodeInfo, SignalPeer};
 use kunxtier_core::token::{self, Kind};
 
 use crate::{Error, Result};
@@ -22,6 +22,13 @@ const SCHEMA_VERSION: i64 = 1;
 
 pub struct Store {
     conn: Connection,
+}
+
+/// 信令认证查询结果 (auth_lookup): 挑战应答校验所需的最小字段。
+pub struct NodeAuth {
+    /// base64(std) 的 sha256(节点凭证), 与库中存储形态一致。
+    pub credential_hash_b64: String,
+    pub ip: String,
 }
 
 fn now() -> i64 {
@@ -53,6 +60,8 @@ fn node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeInfo> {
         ip: address::ipv4_from_u32(ip_u32).to_string(),
         owner: r.get(2)?,
         created_at: r.get(3)?,
+        // 在线态由服务端注册表合并, 存储层一律填 false
+        online: false,
     })
 }
 
@@ -161,11 +170,9 @@ impl Store {
     pub fn has_admin(&self) -> Result<bool> {
         Ok(self
             .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'admin_hash'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = 'admin_hash'", [], |r| {
+                r.get::<_, String>(0)
+            })
             .optional()?
             .is_some())
     }
@@ -420,7 +427,7 @@ impl Store {
                 )
                 .optional()?;
             match disabled {
-                Some(d) if d == 0 => {}
+                Some(0) => {}
                 _ => return Err(Error::Usage("所属用户已禁用或不存在".into())),
             }
         }
@@ -498,12 +505,10 @@ impl Store {
              LEFT JOIN users u ON u.id = n.user_id
              WHERE n.removed_at IS NULL AND nw.name = ?1
              ORDER BY n.id";
-        let mut stmt = self
-            .conn
-            .prepare(match network {
-                Some(_) => SQL_BY_NETWORK,
-                None => SQL_ALL,
-            })?;
+        let mut stmt = self.conn.prepare(match network {
+            Some(_) => SQL_BY_NETWORK,
+            None => SQL_ALL,
+        })?;
         let rows = match network {
             Some(n) => stmt
                 .query_map([n], node_row)?
@@ -512,6 +517,70 @@ impl Store {
                 .query_map([], node_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         };
+        Ok(rows)
+    }
+
+    // ---- 信令认证与节点表 ----
+
+    /// 信令挑战应答查询: 网络 + 节点名 → 凭证哈希与 IP。
+    /// 不存在 / 已移除 / 属主已禁用统一返回 None, 不区分原因以免存在性探测。
+    pub fn auth_lookup(&self, network: &str, name: &str) -> Result<Option<NodeAuth>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT n.credential_hash, n.ip
+                 FROM nodes n
+                 JOIN networks nw ON nw.id = n.network_id
+                 LEFT JOIN users u ON u.id = n.user_id
+                 WHERE nw.name = ?1 AND n.name = ?2 AND n.removed_at IS NULL
+                   AND (n.user_id IS NULL OR u.disabled = 0)",
+                params![network, name],
+                |r| {
+                    Ok(NodeAuth {
+                        credential_hash_b64: r.get(0)?,
+                        ip: address::ipv4_from_u32(r.get::<_, u32>(1)?).to_string(),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// 信令节点表: 同网全部活跃节点; 在线态与候选地址由调用方从注册表合并。
+    pub fn signal_network_nodes(&self, network: &str) -> Result<Vec<SignalPeer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.name, n.ip, n.wg_public_key
+             FROM nodes n
+             JOIN networks nw ON nw.id = n.network_id
+             WHERE nw.name = ?1 AND n.removed_at IS NULL
+             ORDER BY n.id",
+        )?;
+        let rows = stmt
+            .query_map(params![network], |r| {
+                Ok(SignalPeer {
+                    name: r.get(0)?,
+                    ip: address::ipv4_from_u32(r.get::<_, u32>(1)?).to_string(),
+                    wg_public_key: r.get(2)?,
+                    online: false,
+                    candidates: Vec::new(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 属主名下的活跃节点名 (禁用用户时逐个踢下线用)。
+    pub fn node_names_of_user(&self, network: &str, user: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.name
+             FROM nodes n
+             JOIN networks nw ON nw.id = n.network_id
+             JOIN users u ON u.id = n.user_id
+             WHERE nw.name = ?1 AND u.name = ?2 AND n.removed_at IS NULL
+             ORDER BY n.id",
+        )?;
+        let rows = stmt
+            .query_map(params![network, user], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -551,7 +620,9 @@ mod tests {
         let (_d, s) = store();
         default_network(&s);
         s.create_user("default", "alice").unwrap();
-        let (_id, token) = s.issue_token("default", Some("alice"), "node", 3600).unwrap();
+        let (_id, token) = s
+            .issue_token("default", Some("alice"), "node", 3600)
+            .unwrap();
         let (network, ip, cred) = s.consume_node_token(&token, "laptop", &wg_key()).unwrap();
         assert_eq!(network, "default");
         assert_eq!(ip, "100.64.0.1");
@@ -654,6 +725,71 @@ mod tests {
         let restored = Store::open(&out).unwrap();
         assert_eq!(restored.list_networks().unwrap().len(), 1);
         assert_eq!(restored.list_nodes(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn auth_lookup_rejects_removed_and_disabled() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_user("default", "a").unwrap();
+        let (_, t) = s.issue_token("default", Some("a"), "node", 3600).unwrap();
+        let (_, _, _) = s.consume_node_token(&t, "n1", &wg_key()).unwrap();
+        // 活跃节点可查
+        let auth = s.auth_lookup("default", "n1").unwrap().unwrap();
+        assert!(auth.credential_hash_b64.len() >= 44);
+        assert_eq!(auth.ip, "100.64.0.1");
+        // 未知网络 / 未知节点 → None
+        assert!(s.auth_lookup("nope", "n1").unwrap().is_none());
+        assert!(s.auth_lookup("default", "nope").unwrap().is_none());
+        // 属主禁用 → None (存量凭证随信令实时吊销)
+        s.disable_user("default", "a").unwrap();
+        assert!(s.auth_lookup("default", "n1").unwrap().is_none());
+        // 节点移除 → None
+        s.create_user("default", "c").unwrap();
+        let (_, t2) = s.issue_token("default", Some("c"), "node", 3600).unwrap();
+        s.consume_node_token(&t2, "n2", &wg_key()).unwrap();
+        s.remove_node("default", "n2").unwrap();
+        assert!(s.auth_lookup("default", "n2").unwrap().is_none());
+    }
+
+    #[test]
+    fn signal_nodes_table_scopes_to_network() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_network("net2", address::nth_network_base(1).unwrap())
+            .unwrap();
+        s.create_user("default", "a").unwrap();
+        s.create_user("net2", "b").unwrap();
+        let (_, t1) = s.issue_token("default", Some("a"), "node", 60).unwrap();
+        let (_, t2) = s.issue_token("net2", Some("b"), "node", 60).unwrap();
+        s.consume_node_token(&t1, "n1", &wg_key()).unwrap();
+        s.consume_node_token(&t2, "n2", &wg_key()).unwrap();
+        let peers = s.signal_network_nodes("default").unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "n1");
+        assert_eq!(peers[0].wg_public_key, wg_key());
+        assert!(!peers[0].online);
+        // 移除后不再出现在节点表
+        s.remove_node("default", "n1").unwrap();
+        assert!(s.signal_network_nodes("default").unwrap().is_empty());
+    }
+
+    #[test]
+    fn node_names_of_user_filters_owner() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_user("default", "a").unwrap();
+        s.create_user("default", "b").unwrap();
+        let (_, t1) = s.issue_token("default", Some("a"), "node", 60).unwrap();
+        let (_, t2) = s.issue_token("default", Some("b"), "node", 60).unwrap();
+        s.consume_node_token(&t1, "n1", &wg_key()).unwrap();
+        s.consume_node_token(&t1, "n2", &wg_key()).unwrap();
+        s.consume_node_token(&t2, "other", &wg_key()).unwrap();
+        assert_eq!(
+            s.node_names_of_user("default", "a").unwrap(),
+            vec!["n1", "n2"]
+        );
+        assert!(s.node_names_of_user("default", "ghost").unwrap().is_empty());
     }
 
     #[test]

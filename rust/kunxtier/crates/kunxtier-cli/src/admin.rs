@@ -142,7 +142,12 @@ fn print_result(v: &Value) {
                     (Some(n), Some(c), _, _) => println!("{n}\t{c}\tcreated {}", it["created_at"]),
                     (Some(n), _, Some(ip), owner) => {
                         let o = owner.unwrap_or("-");
-                        println!("{n}\t{ip}\towner {o}\tcreated {}", it["created_at"]);
+                        let st = if it["online"].as_bool().unwrap_or(false) {
+                            "online"
+                        } else {
+                            "offline"
+                        };
+                        println!("{n}\t{ip}\t{st}\towner {o}\tcreated {}", it["created_at"]);
                     }
                     _ => println!("{it}"),
                 }

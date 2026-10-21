@@ -51,7 +51,11 @@ impl RelayConfig {
         env: impl Fn(&str) -> Option<String>,
         file: FileConfig,
     ) -> Result<Self> {
-        let pick = |cli_v: Option<String>, env_key: &str, file_v: Option<String>, default: &str| -> String {
+        let pick = |cli_v: Option<String>,
+                    env_key: &str,
+                    file_v: Option<String>,
+                    default: &str|
+         -> String {
             cli_v
                 .or_else(|| env(env_key).filter(|s| !s.is_empty()))
                 .or(file_v)
@@ -96,19 +100,18 @@ mod tests {
 
     #[test]
     fn defaults_when_all_layers_empty() {
-        let cfg = RelayConfig::resolve(CliOverrides::default(), no_env, FileConfig::default()).unwrap();
+        let cfg =
+            RelayConfig::resolve(CliOverrides::default(), no_env, FileConfig::default()).unwrap();
         assert_eq!(cfg.listen.to_string(), "0.0.0.0:443");
         assert_eq!(cfg.data_dir, PathBuf::from("./kunxtier-state"));
     }
 
     #[test]
     fn priority_cli_over_env_over_file() {
-        let env = |k: &str| {
-            match k {
-                ENV_LISTEN => Some("1.1.1.1:1111".to_string()),
-                ENV_DATA_DIR => Some("./from-env".to_string()),
-                _ => None,
-            }
+        let env = |k: &str| match k {
+            ENV_LISTEN => Some("1.1.1.1:1111".to_string()),
+            ENV_DATA_DIR => Some("./from-env".to_string()),
+            _ => None,
         };
         let file = FileConfig {
             listen: Some("2.2.2.2:2222".into()),
