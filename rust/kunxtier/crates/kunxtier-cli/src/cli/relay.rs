@@ -1,0 +1,138 @@
+//! Description: relay 子命令: 核心中继 init / run / backup 与卫星模式装配。
+//!
+//! Author: qinzhenya
+//! Created: 2026-10-21
+
+use std::path::PathBuf;
+
+use clap::{Args, Subcommand};
+
+use kunxtier_core::config::{
+    CliOverrides, FileConfig, RelayConfig, SatelliteConfig, SatelliteOverrides,
+};
+
+use super::error::Fail;
+
+#[derive(Args)]
+pub struct RelayCommand {
+    /// 初始化: 自签证书 / admin 凭证 / 默认网络 (明文凭证仅展示一次)
+    #[arg(long)]
+    init: bool,
+    /// 卫星模式: 纯转发, 以 relay 令牌向核心注册 (与 --init 互斥)
+    #[arg(long)]
+    satellite: bool,
+    /// 卫星模式: 核心中继地址 (host:port 或 https://host:port)
+    #[arg(long)]
+    core: Option<String>,
+    /// 对外公布的本机地址 (中继列表内置条目 / 卫星注册声明用)
+    #[arg(long)]
+    advertise: Option<String>,
+    /// 卫星模式: 核心证书指纹 (relay --init 输出)
+    #[arg(long, env = "KUNXTIER_FINGERPRINT")]
+    fingerprint: Option<String>,
+    /// 配置文件路径 (relay.toml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// 监听地址 (覆盖 env / 配置文件)
+    #[arg(long)]
+    listen: Option<String>,
+    /// 状态数据目录 (覆盖 env / 配置文件)
+    #[arg(long)]
+    data_dir: Option<String>,
+    #[command(subcommand)]
+    action: Option<RelayAction>,
+}
+
+#[derive(Subcommand)]
+pub enum RelayAction {
+    /// 导出一致性备份 (SQLite 快照)
+    Backup { out: PathBuf },
+}
+
+impl RelayCommand {
+    pub fn execute(self) -> Result<(), Fail> {
+        let file = match self.config.as_deref() {
+            Some(p) => {
+                FileConfig::load(p).map_err(|e| Fail::usage(format!("配置文件加载失败: {e}")))?
+            }
+            None => FileConfig::default(),
+        };
+        if self.satellite {
+            self.satellite_mode(file)
+        } else {
+            self.core_mode(file)
+        }
+    }
+
+    fn satellite_mode(self, file: FileConfig) -> Result<(), Fail> {
+        if self.init {
+            return Err(Fail::usage(
+                "--satellite 与 --init 互斥: 卫星无状态目录, 无需初始化",
+            ));
+        }
+        if self.action.is_some() {
+            return Err(Fail::usage("--satellite 模式不支持 backup 等子动作"));
+        }
+        let cfg = SatelliteConfig::resolve(
+            SatelliteOverrides {
+                core: self.core,
+                listen: self.listen,
+                advertise: self.advertise,
+                fingerprint: self.fingerprint,
+            },
+            |k| std::env::var(k).ok(),
+            file,
+        )
+        .map_err(|e| Fail::usage(format!("卫星配置解析失败: {e}")))?;
+        // expect 理由: 仅在系统线程资源耗尽时失败, 属环境级故障, 无恢复价值
+        let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
+        rt.block_on(kunxtier_relay::satellite::run(&cfg))
+            .map_err(|e| Fail::runtime(format!("卫星中继退出: {e}")))
+    }
+
+    fn core_mode(self, file: FileConfig) -> Result<(), Fail> {
+        let cfg = RelayConfig::resolve(
+            CliOverrides {
+                listen: self.listen,
+                data_dir: self.data_dir,
+                advertise: self.advertise,
+            },
+            |k| std::env::var(k).ok(),
+            file,
+        )
+        .map_err(|e| Fail::usage(format!("配置解析失败: {e}")))?;
+
+        if let Some(RelayAction::Backup { out }) = self.action {
+            kunxtier_relay::store::Store::open(&cfg.db_path())
+                .and_then(|s| s.backup_to(&out))
+                .map_err(|e| Fail::runtime(format!("备份失败: {e}")))?;
+            println!("备份完成: {}", out.display());
+            return Ok(());
+        }
+
+        if self.init {
+            let out = kunxtier_relay::init(&cfg)
+                .map_err(|e| Fail::runtime(format!("初始化失败: {e}")))?;
+            println!("初始化完成");
+            println!("  状态目录: {}", out.data_dir);
+            println!();
+            println!("  admin 凭证 (仅此一次展示, 妥善保存):");
+            println!("    {}", out.admin_credential);
+            println!();
+            println!("  服务端证书指纹 (客户端固定使用):");
+            println!("    {}", out.fingerprint);
+            println!();
+            println!("  启动: kunxtier relay");
+            println!(
+                "  管理: KUNXTIER_ADMIN=<上面的 admin 凭证> kunxtier admin --server https://<addr> --fingerprint {} network list",
+                out.fingerprint
+            );
+            return Ok(());
+        }
+
+        // expect 理由: 仅在系统线程资源耗尽时失败, 属环境级故障, 无恢复价值
+        let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
+        rt.block_on(kunxtier_relay::server::run(&cfg))
+            .map_err(|e| Fail::runtime(format!("核心中继退出: {e}")))
+    }
+}
