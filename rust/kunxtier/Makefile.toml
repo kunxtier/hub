@@ -1,0 +1,130 @@
+# cargo-make 任务集, 按领域划分: 构建 / 质量 / 测试 / 运行 / 发布 / 清理
+#
+# 前置: cargo install cargo-make
+# 用法: cargo make --list-all-steps 查看全部任务; cargo make <任务名> 执行
+# 约定: 任务统一在 workspace 根执行; 本地试跑走 [env] 缺省高位端口, 避开 443 权限问题
+
+[config]
+# 不逐 crate 重复执行, cargo 命令在根目录一次覆盖全部成员
+default_to_workspace = false
+
+[env]
+# 本地试跑缺省值; CLI 配置层为 CLI > ENV > CONFIG > DEFAULT, 此处即 ENV 层
+KUNXTIER_LISTEN = "127.0.0.1:9443"
+KUNXTIER_DATA_DIR = "./kunxtier-state"
+
+# ---- 构建 ----
+
+[tasks.build]
+category = "构建"
+description = "编译全部 crate (debug)"
+command = "cargo"
+args = ["build", "--workspace"]
+
+[tasks.check]
+category = "构建"
+description = "快速类型检查, 不产出二进制"
+command = "cargo"
+args = ["check", "--workspace"]
+
+[tasks.build-release]
+category = "构建"
+description = "编译 release 产物"
+command = "cargo"
+args = ["build", "--workspace", "--release"]
+
+# ---- 质量 ----
+
+[tasks.fmt]
+category = "质量"
+description = "格式化全部代码"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.fmt-check]
+category = "质量"
+description = "校验格式, 不修改文件"
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+[tasks.clippy]
+category = "质量"
+description = "静态检查, 警告视为错误"
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.lint]
+category = "质量"
+description = "格式校验 + 静态检查"
+dependencies = ["fmt-check", "clippy"]
+
+# ---- 测试 ----
+
+[tasks.test]
+category = "测试"
+description = "运行全部测试 (单元 + 集成)"
+command = "cargo"
+args = ["test", "--workspace"]
+
+# ---- 运行 ----
+# admin 操作不设任务: 凭证只走环境变量 KUNXTIER_ADMIN, 不落任何文件。
+# 手动示例 (指纹来自 relay-init 任务输出):
+#   KUNXTIER_ADMIN=kxt_admin_xxx cargo run -p kunxtier-cli --bin kunxtier -- \
+#     admin --server https://127.0.0.1:9443 --fingerprint <指纹> network list
+
+[tasks.relay-init]
+category = "运行"
+description = "初始化状态目录 (证书 / admin 凭证 / 默认网络; 明文凭证仅展示一次)"
+command = "cargo"
+args = ["run", "-p", "kunxtier-cli", "--bin", "kunxtier", "--", "relay", "--init"]
+
+[tasks.relay-run]
+category = "运行"
+description = "启动核心中继 (KUNXTIER_LISTEN / KUNXTIER_DATA_DIR 可覆盖)"
+command = "cargo"
+args = ["run", "-p", "kunxtier-cli", "--bin", "kunxtier", "--", "relay"]
+
+[tasks.relay-watch]
+category = "运行"
+description = "热编译: 源码变更自动重建并重启核心中继 (前置: relay-init; cargo install cargo-watch)"
+command = "cargo"
+args = ["watch", "--clear", "-x", "run -p kunxtier-cli --bin kunxtier -- relay"]
+
+[tasks.relay-backup]
+category = "运行"
+description = "导出一致性备份, 文件名自动带时间戳 (*.db 已进 .gitignore)"
+script = '''
+cargo run -p kunxtier-cli --bin kunxtier -- relay backup ./backup-$(date +%Y%m%d-%H%M%S).db
+'''
+
+# ---- 发布 ----
+# 部署任务待部署形态确定 (systemd / 容器 / 静态二进制分发) 后再补, 不预建空壳
+
+[tasks.release]
+category = "发布"
+description = "发布门槛: 质量 + 测试 + release 编译"
+dependencies = ["lint", "test", "build-release"]
+
+[tasks.release-info]
+category = "发布"
+description = "展示产物路径与版本号"
+dependencies = ["build-release"]
+script = '''
+ls -lh target/release/kunxtier
+./target/release/kunxtier --version
+'''
+
+# ---- 清理 ----
+
+[tasks.clean]
+category = "清理"
+description = "清理构建产物; 不触碰 kunxtier-state (含 TLS 私钥与 SQLite)"
+command = "cargo"
+args = ["clean"]
+
+# ---- 缺省流程 ----
+
+[tasks.default]
+category = "流程"
+description = "缺省流程: 格式校验 + 静态检查 + 测试"
+dependencies = ["lint", "test"]

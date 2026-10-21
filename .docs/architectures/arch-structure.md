@@ -38,3 +38,26 @@ hub/
 | 单 workspace vs 项目级 workspace | 项目级 workspace | 牺牲仓级统一依赖版本管理, 换取零成本拆仓 |
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
+
+## 当前实际结构 (2026-10-20, ik-advance --init)
+
+```text
+hub/
+├── .docs/                        # 规划文档全套已落地
+├── rust/kunxtier/                # 已落地
+│   ├── Cargo.toml                # workspace 根 + 统一依赖版本
+│   ├── Makefile.toml             # cargo-make 任务集 (构建 / 质量 / 测试 / 运行 / 发布)
+│   └── crates/
+│       ├── kunxtier-core/        # 协议 / 凭证令牌 / 地址 / 分层配置
+│       ├── kunxtier-relay/       # 核心中继: store + server + init + cert + ratelimit + client_tls + error
+│       └── kunxtier-cli/         # 二进制 kunxtier: relay / admin 子命令
+├── CLAUDE.md                     # 已创建
+└── web/                          # 未建 (控制台前端阶段落地)
+```
+
+## 演化决策记录
+
+- 2026-10-20 (init): kunxtier-node crate 未建——数据面阶段再落地, 不预建空壳; web/ 同理。已交付切片: 控制面登记闭环 (init / HTTPS 管理 API / 节点注册 / 限速 / 备份)。
+- 已知妥协: store 用 std::sync::Mutex 包同步 SQLite, handler 内短临界区; 信令阶段的并发压力实际显现时再评估异步化。
+- 已知妥协: 限速器过期表项不主动清理, 源数量自然有界 (单机个人规模)。
+- 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

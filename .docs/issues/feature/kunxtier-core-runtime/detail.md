@@ -66,3 +66,8 @@ kunxtier (轻量 P2P 虚拟组网, ZeroTier / EasyTier 平替) 规划已完成: 
 - `e2e-kunxtier-network.md` 场景矩阵全量通过
 - `nfr-kunxtier-security.md` 验收标准逐条核对
 - macOS / Linux / Windows 发布产物由统一构建入口产出并实际运行验证
+
+## 推进记录
+
+- 2026-10-20 (ik-advance --init): 交付控制面登记闭环。rust/kunxtier workspace (core / relay / cli 三 crate) 与根 CLAUDE.md 落地; `relay --init` (自签证书 / admin 凭证 / 默认网络 / key 0600)、`relay` 运行 (HTTPS 管理 API)、admin 全套管理命令 (含 user disable)、节点一次性令牌注册 (IP 分配 + 节点凭证签发)、注册与认证限速、`relay backup`。28 项测试通过 (单元 25 + 集成 3), 二进制冒烟通过。T01-T03 done; 下一步 T04 信令 WS (节点凭证挑战应答)。
+- 实现期修复的两个缺陷 (测试守恒捕获): next_ip 漏递增导致 IP 重复分配; 节点同名唯一约束未排除已移除行, 挡住 FR-17 的同名重注册。

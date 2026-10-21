@@ -1,0 +1,23 @@
+[package]
+name = "kunxtier-relay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kunxtier-core.workspace = true
+tokio.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+rusqlite.workspace = true
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -29,3 +29,7 @@ logs/
 # 缓存
 *.tsbuildinfo
 .data
+
+# kunxtier 运行态 (含 TLS 私钥与 SQLite)
+kunxtier-state/
+*.db

@@ -1,0 +1,36 @@
+# hub monorepo 工作说明
+
+按语言组织的多项目仓库; 项目自包含, 成熟后整体拆仓。结构约定与拆仓规则见 `.docs/architectures/arch-structure.md`。
+
+## 当前项目
+
+- rust/kunxtier: 轻量 P2P 虚拟组网 (ZeroTier / EasyTier 平替)。cargo workspace:
+  - kunxtier-core: 协议消息 / 凭证与令牌 / 地址分配 / 分层配置
+  - kunxtier-relay: 核心中继 (登记 / 管理 API / 自签 TLS / 限速 / 备份)
+  - kunxtier-cli: 单一入口二进制 `kunxtier`
+  - kunxtier-node (数据面) 与 web/kunxtier-console (控制台前端) 按阶段推进再落地
+- 规划文档: `.docs/` (requirements / architectures / testing / issues)
+
+## 常用命令
+
+```sh
+cd rust/kunxtier
+cargo build
+cargo test
+# 本地试跑 (避免 443 权限问题, 指定高位端口)
+cargo run -p kunxtier-cli --bin kunxtier -- relay --init --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
+cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
+
+# 任务编排 (cargo-make, rust/kunxtier/Makefile.toml, 按领域划分)
+cargo make --list-all-steps   # 查看全部任务
+cargo make                    # 缺省: 格式校验 + clippy + 测试
+```
+
+- 运行态目录 `kunxtier-state/` 含 TLS 私钥与 SQLite, 已进 .gitignore, 严禁提交或外传
+- admin 凭证只走 env `KUNXTIER_ADMIN`, 证书指纹走 `KUNXTIER_FINGERPRINT` 或 `--fingerprint`
+
+## 流程
+
+- 规划: /ik-plan; 阶段推进: /ik-advance; 阶段内跨会话: /ik-handoff; 提交: /ik-commit
+- issue 与文档 CRUD: docsctl (`node .claude/skills/docs-repo/scripts/docsctl.mjs`)
+- 全部约束见 .claude/rules (安全红线 / 执行边界 / 输出约束: 禁 emoji, 文档正文中文)
