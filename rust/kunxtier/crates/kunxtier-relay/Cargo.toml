@@ -9,6 +9,8 @@ tokio.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
 rcgen.workspace = true
 rusqlite.workspace = true
 ureq.workspace = true
@@ -22,5 +24,3 @@ futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio-tungstenite.workspace = true
-tokio-rustls.workspace = true

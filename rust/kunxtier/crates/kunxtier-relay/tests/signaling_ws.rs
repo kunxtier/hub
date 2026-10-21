@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use kunxtier_core::config::RelayConfig;
+use kunxtier_core::protocol::SignalRelay;
 use kunxtier_relay::client_tls::{pinning_agent, PinVerifier};
 use kunxtier_relay::server::{build_router, AppState};
 use kunxtier_relay::store::Store;
@@ -32,18 +33,31 @@ struct Ctx {
     agent: ureq::Agent,
 }
 
+/// 内置转发条目 (与 server::run 的装配口径一致: 具体监听地址 + 自身指纹)。
+fn builtin_relay(addr: SocketAddr, fingerprint: &str) -> SignalRelay {
+    SignalRelay {
+        addr: addr.to_string(),
+        kind: "core".into(),
+        fingerprint: fingerprint.to_string(),
+    }
+}
+
 async fn start_relay(dir: &Path) -> Ctx {
     let cfg = RelayConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
+        advertise: None,
     };
     let out = kunxtier_relay::init(&cfg).unwrap();
-    let state = Arc::new(AppState::new(Store::open(&cfg.db_path()).unwrap()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = Arc::new(AppState::new(
+        Store::open(&cfg.db_path()).unwrap(),
+        builtin_relay(addr, &out.fingerprint),
+    ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
         .unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
     let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
     // 服务端任务由 worker 驱动, 测试主线程做阻塞 HTTP / 异步 WS 调用
     tokio::spawn(async move {
@@ -249,11 +263,15 @@ async fn challenge_response_and_state_push() {
     assert_eq!(ok["heartbeat_interval_secs"], 10);
     assert_eq!(ok["idle_timeout_secs"], 30);
 
-    // 全量节点表: 自身在线、公钥、策略与空中继列表
+    // 全量节点表: 自身在线、公钥、策略与中继列表 (无卫星时仅内置条目)
     let state = next_msg(&mut ws).await;
     assert_eq!(state["type"], "state");
     assert_eq!(state["policy"], "auto");
-    assert_eq!(state["relays"].as_array().unwrap().len(), 0);
+    let relays = state["relays"].as_array().unwrap();
+    assert_eq!(relays.len(), 1);
+    assert_eq!(relays[0]["kind"], "core");
+    assert_eq!(relays[0]["addr"], ctx.addr.to_string());
+    assert_eq!(relays[0]["fingerprint"], ctx.fp);
     let nodes = state["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["name"], "laptop");
@@ -386,19 +404,13 @@ async fn revocation_disconnects_and_rejects() {
     let closed = next_msg(&mut ws).await;
     assert_eq!(closed["type"], "closed");
 
-    // 重连被拒: 禁用属主下凭证不可再认证
+    // 重连被拒: 禁用属主下 hello 即拒绝 (统一口径, 不进入挑战阶段)
     let mut retry = ws_dial(ctx.addr, &ctx.fp).await.unwrap();
     send_json(
         &mut retry,
         json!({"type": "hello", "network": "default", "name": "laptop"}),
     )
     .await;
-    let challenge = next_msg(&mut retry).await;
-    let nonce = STANDARD
-        .decode(challenge["nonce"].as_str().unwrap())
-        .unwrap();
-    let digest = STANDARD.encode(kunxtier_core::token::challenge_answer(&nonce, &cred_a));
-    send_json(&mut retry, json!({"type": "auth", "digest": digest})).await;
     let err = next_msg(&mut retry).await;
     assert_eq!(err["type"], "auth_err");
 

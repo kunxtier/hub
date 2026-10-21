@@ -1,7 +1,9 @@
-//! Description: 控制面协议消息 (当前切片: 登记 / 注册 / 管理 / 信令)。
+//! Description: 控制面协议消息 (当前切片: 登记 / 注册 / 管理 / 信令 / 转发)。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-20
+
+use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
@@ -109,12 +111,17 @@ pub struct SignalPeer {
     pub candidates: Vec<String>,
 }
 
-/// 中继转发端点 (T04 仅占位, 卫星注册与列表分发随 T05 接入)。
+/// 中继转发端点: 推送给节点的回落目标。
+/// 列表顺序即尝试顺序: 卫星在前, 核心内置转发恒在末位兜底 (FR-3)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalRelay {
+    /// 拨号地址 host:port; kind 为 "core" 且为空串时表示
+    /// "节点已连接的核心自身", 由节点用自身配置的核心地址代入。
     pub addr: String,
     /// "core" (核心内置转发) | "satellite"。
     pub kind: String,
+    /// 该端点 TLS 证书指纹 (sha256 hex), 客户端按条目固定校验 (NFR-6)。
+    pub fingerprint: String,
 }
 
 /// 客户端 → 服务端信令消息: JSON 文本帧, type 标签分派。
@@ -186,4 +193,119 @@ pub enum SignalServerMsg {
     Closed {
         reason: String,
     },
+    /// 中继列表全量更新 (卫星注册 / 断连摘除 / 令牌吊销踢线), 广播到全部网络。
+    Relays {
+        relays: Vec<SignalRelay>,
+    },
+}
+
+// ---- 转发 WS (/ws/relay) ----
+
+/// 转发面二进制帧: [4 字节大端目的 IPv4][不透明 WireGuard 密文]。
+/// 下行帧的目的字段即接收方本机虚拟 IP, 上下行同构 (FR-4: 中继只见密文)。
+pub const FORWARD_HEADER_BYTES: usize = 4;
+
+pub fn encode_forward_frame(dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(FORWARD_HEADER_BYTES + payload.len());
+    frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// 解析转发帧; 长度不足或承载非 IPv4 语义之外的错误均由长度判定兜住。
+pub fn decode_forward_frame(bytes: &[u8]) -> Option<(Ipv4Addr, &[u8])> {
+    let (head, payload) = bytes.split_at_checked(FORWARD_HEADER_BYTES)?;
+    if payload.is_empty() {
+        return None;
+    }
+    let octets: [u8; 4] = head.try_into().expect("长度已由 split_at_checked 保证");
+    Some((Ipv4Addr::from(octets), payload))
+}
+
+/// 转发面文本控制帧: 准入声明与心跳。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForwardClientMsg {
+    /// 卫星准入: 声明本机虚拟 IP (零知识模式专用; 核心模式 IP 由库存权威决定)。
+    Bind { ip: String },
+    /// 应用层心跳 (数据面无常态 JSON 流, 空闲时由客户端驱动保活)。
+    Ping,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForwardServerMsg {
+    /// 绑定成功: 本端 IP 与心跳参数 (客户端不硬编码, 与信令 AuthOk 同一原则)。
+    Bound {
+        ip: String,
+        heartbeat_interval_secs: u64,
+        idle_timeout_secs: u64,
+    },
+    Pong,
+    Error {
+        message: String,
+    },
+    Closed {
+        reason: String,
+    },
+}
+
+// ---- 卫星注册 WS (/ws/satellite, 核心侧) ----
+
+/// 卫星 → 核心: 注册声明。relay 令牌可复用 (FR-9), 不因注册而消耗。
+/// 双向均有实现 (进程在 relay crate 内), 故两个方向都派生序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SatelliteClientMsg {
+    Register {
+        token: String,
+        /// 对节点公布的拨号地址 host:port, 由卫星自报 (核心不探测)。
+        advertise: String,
+        /// 卫星 TLS 证书指纹 (sha256 hex), 随列表分发给节点固定。
+        fingerprint: String,
+    },
+    Ping,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SatelliteServerMsg {
+    Registered,
+    Error { message: String },
+    Pong,
+    Closed { reason: String },
+}
+
+// ------------------------------ 单元测试 --------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forward_frame_roundtrip() {
+        let frame = encode_forward_frame("100.64.0.7".parse().unwrap(), &[1, 2, 3]);
+        let (dst, payload) = decode_forward_frame(&frame).unwrap();
+        assert_eq!(dst.to_string(), "100.64.0.7");
+        assert_eq!(payload, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn forward_frame_rejects_short_input() {
+        assert!(decode_forward_frame(&[]).is_none());
+        assert!(decode_forward_frame(&[100, 64]).is_none());
+        // 头部完整但没有载荷: 不构成合法 WG 帧
+        assert!(decode_forward_frame(&[100, 64, 0, 7]).is_none());
+    }
+
+    #[test]
+    fn signal_relay_serializes_fingerprint() {
+        let relay = SignalRelay {
+            addr: "1.2.3.4:443".into(),
+            kind: "satellite".into(),
+            fingerprint: "ab".repeat(32),
+        };
+        let v = serde_json::to_value(&relay).unwrap();
+        assert_eq!(v["fingerprint"], "ab".repeat(32));
+    }
 }

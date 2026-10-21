@@ -3,7 +3,7 @@
 //! Author: qinzhenya
 //! Created: 2026-10-20
 //!
-//! 当前切片: relay (init / run / backup) 与 admin 管理;
+//! 当前切片: relay (init / run / backup / 卫星模式) 与 admin 管理;
 //! daemon / up / down / status 在数据面阶段接入。
 
 mod admin;
@@ -11,7 +11,9 @@ mod admin;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use kunxtier_core::config::{CliOverrides, FileConfig, RelayConfig};
+use kunxtier_core::config::{
+    CliOverrides, FileConfig, RelayConfig, SatelliteConfig, SatelliteOverrides,
+};
 
 #[derive(Parser)]
 #[command(
@@ -26,11 +28,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 运行核心中继 (管理 + 登记); --init 初始化状态目录
+    /// 运行核心中继 (管理 + 登记); --init 初始化状态目录; --satellite 起纯转发卫星
     Relay {
         /// 初始化: 自签证书 / admin 凭证 / 默认网络 (明文凭证仅展示一次)
         #[arg(long)]
         init: bool,
+        /// 卫星模式: 纯转发, 以 relay 令牌向核心注册 (与 --init 互斥)
+        #[arg(long)]
+        satellite: bool,
+        /// 卫星模式: 核心中继地址 (host:port 或 https://host:port)
+        #[arg(long)]
+        core: Option<String>,
+        /// 对外公布的本机地址 (中继列表内置条目 / 卫星注册声明用)
+        #[arg(long)]
+        advertise: Option<String>,
+        /// 卫星模式: 核心证书指纹 (relay --init 输出)
+        #[arg(long, env = "KUNXTIER_FINGERPRINT")]
+        fingerprint: Option<String>,
         /// 配置文件路径 (relay.toml)
         #[arg(long)]
         config: Option<PathBuf>,
@@ -163,11 +177,25 @@ fn main() {
     match cli.command {
         Command::Relay {
             init,
+            satellite,
+            core,
+            advertise,
+            fingerprint,
             config,
             listen,
             data_dir,
             action,
-        } => run_relay(init, config, listen, data_dir, action),
+        } => run_relay(
+            init,
+            satellite,
+            core,
+            advertise,
+            fingerprint,
+            config,
+            listen,
+            data_dir,
+            action,
+        ),
         Command::Admin {
             server,
             fingerprint,
@@ -182,8 +210,13 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_relay(
     init: bool,
+    satellite: bool,
+    core: Option<String>,
+    advertise: Option<String>,
+    fingerprint: Option<String>,
     config: Option<PathBuf>,
     listen: Option<String>,
     data_dir: Option<String>,
@@ -199,8 +232,47 @@ fn run_relay(
         },
         None => FileConfig::default(),
     };
+
+    if satellite {
+        if init {
+            eprintln!("--satellite 与 --init 互斥: 卫星无状态目录, 无需初始化");
+            std::process::exit(2);
+        }
+        if action.is_some() {
+            eprintln!("--satellite 模式不支持 backup 等子动作");
+            std::process::exit(2);
+        }
+        let cfg = match SatelliteConfig::resolve(
+            SatelliteOverrides {
+                core,
+                listen,
+                advertise,
+                fingerprint,
+            },
+            |k| std::env::var(k).ok(),
+            file,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("卫星配置解析失败: {e}");
+                std::process::exit(2);
+            }
+        };
+        // expect 理由: 仅在系统线程资源耗尽时失败, 属环境级故障, 无恢复价值
+        let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
+        if let Err(e) = rt.block_on(kunxtier_relay::satellite::run(&cfg)) {
+            eprintln!("卫星中继退出: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cfg = match RelayConfig::resolve(
-        CliOverrides { listen, data_dir },
+        CliOverrides {
+            listen,
+            data_dir,
+            advertise,
+        },
         |k| std::env::var(k).ok(),
         file,
     ) {

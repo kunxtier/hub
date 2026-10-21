@@ -171,6 +171,13 @@ impl OnlineRegistry {
         }
         out
     }
+
+    /// 广播到全部网络 (中继列表等全网级事件: 卫星不感知网络, 列表全网同构)。
+    pub fn broadcast_all(&self, msg: SignalServerMsg) {
+        for (_, slot) in self.lock().iter() {
+            let _ = slot.tx.try_send(msg.clone());
+        }
+    }
 }
 
 impl Default for OnlineRegistry {
@@ -195,10 +202,10 @@ pub async fn ws_handler(
 }
 
 /// 认证结果: 会话身份; 凭证相关数据在认证完成后即不可达。
-struct Authenticated {
-    network: String,
-    name: String,
-    ip: String,
+pub(crate) struct Authenticated {
+    pub(crate) network: String,
+    pub(crate) name: String,
+    pub(crate) ip: String,
 }
 
 /// 信令会话: 认证 (限时) → 登记 → 初始化推送 → 事件循环 → 收尾。
@@ -281,7 +288,8 @@ fn teardown(state: &AppState, key: &NodeKey, gen: u64) {
 
 /// 认证阶段: hello → challenge → auth, 全程限时 AUTH_TIMEOUT。
 /// 失败返回原因 (客户端已尽力收到 AuthErr 的, 由调用方关闭连接)。
-async fn authenticate(
+/// 转发面 (/ws/relay) 复用本流程, 通过后 IP 由库存权威决定。
+pub(crate) async fn authenticate(
     socket: &mut WebSocket,
     state: &AppState,
     peer: SocketAddr,
@@ -366,7 +374,7 @@ async fn announce_and_push(
     let self_entry = nodes.iter().find(|p| p.name == auth.name).cloned();
     let state_msg = SignalServerMsg::State {
         nodes,
-        relays: Vec::new(),
+        relays: state.relay_list(),
         policy: PathPolicy::Auto,
     };
     send_strict(socket, &state_msg)

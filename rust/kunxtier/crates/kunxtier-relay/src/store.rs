@@ -349,7 +349,41 @@ impl Store {
         Ok((id, plain))
     }
 
-    pub fn revoke_token(&self, id: i64) -> Result<()> {
+    /// 校验卫星注册令牌: kind 必须为 relay 且未撤销未过期; 可复用 (FR-9), 不标记已用。
+    /// 通过则返回令牌 id (核心注册表按令牌踢线定位用)。
+    pub fn verify_relay_token(&self, plain: &str) -> Result<Option<i64>> {
+        if token::kind_of(plain) != Some(Kind::RelayToken) || !token::looks_valid(plain) {
+            return Ok(None);
+        }
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, expires_at, revoked_at FROM tokens
+                 WHERE token_hash = ?1 AND kind = 'relay'",
+                params![hash_b64(plain)],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match row {
+            Some((id, expires, revoked)) if revoked.is_none() && expires > now() => Some(id),
+            _ => None,
+        })
+    }
+
+    /// 撤销令牌, 返回其 kind (调用方按 kind 决定联动动作, 如踢卫星线)。
+    pub fn revoke_token(&self, id: i64) -> Result<String> {
+        let kind: Option<String> = self
+            .conn
+            .query_row("SELECT kind FROM tokens WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()?;
         let n = self.conn.execute(
             "UPDATE tokens SET revoked_at = ?2
              WHERE id = ?1 AND revoked_at IS NULL AND used_at IS NULL",
@@ -359,7 +393,7 @@ impl Store {
             return Err(Error::Usage(format!("令牌不存在或已不可撤销: {id}")));
         }
         tracing::info!(token_id = id, "令牌撤销");
-        Ok(())
+        Ok(kind.unwrap_or_default())
     }
 
     // ---- 节点注册与生命周期 ----
@@ -678,6 +712,32 @@ mod tests {
     }
 
     #[test]
+    fn relay_token_verify_reusable_and_rejects() {
+        let (_d, s) = store();
+        default_network(&s);
+        let (id, rt) = s.issue_token("default", None, "relay", 60).unwrap();
+        // 可复用: 多次校验均通过且返回同一 id
+        assert_eq!(s.verify_relay_token(&rt).unwrap(), Some(id));
+        assert_eq!(s.verify_relay_token(&rt).unwrap(), Some(id));
+        // node 令牌与非法串不能通过卫星校验
+        s.create_user("default", "alice").unwrap();
+        let (_, nt) = s.issue_token("default", Some("alice"), "node", 60).unwrap();
+        assert_eq!(s.verify_relay_token(&nt).unwrap(), None);
+        assert_eq!(s.verify_relay_token("kxt_relay_short").unwrap(), None);
+        // 撤销后立即失效
+        assert_eq!(s.revoke_token(id).unwrap(), "relay");
+        assert_eq!(s.verify_relay_token(&rt).unwrap(), None);
+    }
+
+    #[test]
+    fn relay_token_expired_is_rejected() {
+        let (_d, s) = store();
+        default_network(&s);
+        let (_, rt) = s.issue_token("default", None, "relay", 0).unwrap();
+        assert_eq!(s.verify_relay_token(&rt).unwrap(), None);
+    }
+
+    #[test]
     fn remove_node_and_name_reuse() {
         let (_d, s) = store();
         default_network(&s);
@@ -781,9 +841,10 @@ mod tests {
         s.create_user("default", "a").unwrap();
         s.create_user("default", "b").unwrap();
         let (_, t1) = s.issue_token("default", Some("a"), "node", 60).unwrap();
+        let (_, t1b) = s.issue_token("default", Some("a"), "node", 60).unwrap();
         let (_, t2) = s.issue_token("default", Some("b"), "node", 60).unwrap();
         s.consume_node_token(&t1, "n1", &wg_key()).unwrap();
-        s.consume_node_token(&t1, "n2", &wg_key()).unwrap();
+        s.consume_node_token(&t1b, "n2", &wg_key()).unwrap();
         s.consume_node_token(&t2, "other", &wg_key()).unwrap();
         assert_eq!(
             s.node_names_of_user("default", "a").unwrap(),

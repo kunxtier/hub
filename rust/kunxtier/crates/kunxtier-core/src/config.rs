@@ -16,12 +16,18 @@ pub const DEFAULT_LISTEN: &str = "0.0.0.0:443";
 pub const DEFAULT_DATA_DIR: &str = "./kunxtier-state";
 pub const ENV_LISTEN: &str = "KUNXTIER_LISTEN";
 pub const ENV_DATA_DIR: &str = "KUNXTIER_DATA_DIR";
+pub const ENV_ADVERTISE: &str = "KUNXTIER_ADVERTISE";
+pub const ENV_CORE: &str = "KUNXTIER_CORE";
+pub const ENV_RELAY_TOKEN: &str = "KUNXTIER_RELAY_TOKEN";
+pub const ENV_FINGERPRINT: &str = "KUNXTIER_FINGERPRINT";
 
 /// 文件层 (relay.toml)。
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct FileConfig {
     pub listen: Option<String>,
     pub data_dir: Option<String>,
+    /// 对外公布的本机地址 (中继列表内置条目用); 卫星模式即注册声明地址。
+    pub advertise: Option<String>,
 }
 
 impl FileConfig {
@@ -36,12 +42,15 @@ impl FileConfig {
 pub struct CliOverrides {
     pub listen: Option<String>,
     pub data_dir: Option<String>,
+    pub advertise: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayConfig {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
+    /// 对节点公布的本机地址; 缺省在监听地址具体 (非 0.0.0.0) 时取监听地址。
+    pub advertise: Option<SocketAddr>,
 }
 
 impl RelayConfig {
@@ -64,8 +73,16 @@ impl RelayConfig {
         let listen: SocketAddr = pick(cli.listen, ENV_LISTEN, file.listen, DEFAULT_LISTEN)
             .parse()
             .map_err(|_| Error::Config("listen 不是合法的 SocketAddr".into()))?;
+        let advertise = match pick(cli.advertise, ENV_ADVERTISE, file.advertise, "") {
+            s if s.is_empty() => None,
+            s => Some(
+                s.parse()
+                    .map_err(|_| Error::Config("advertise 不是合法的 SocketAddr".into()))?,
+            ),
+        };
         Ok(RelayConfig {
             listen,
+            advertise,
             data_dir: PathBuf::from(pick(
                 cli.data_dir,
                 ENV_DATA_DIR,
@@ -73,6 +90,15 @@ impl RelayConfig {
                 DEFAULT_DATA_DIR,
             )),
         })
+    }
+
+    /// 内置转发条目的公布地址: advertise 优先, 监听地址具体时取监听地址,
+    /// 通配监听且未配置 advertise 时为 None (由节点以自身核心地址代入)。
+    pub fn builtin_addr(&self) -> Option<SocketAddr> {
+        if self.advertise.is_some() {
+            return self.advertise;
+        }
+        (!self.listen.ip().is_unspecified()).then_some(self.listen)
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -85,6 +111,82 @@ impl RelayConfig {
 
     pub fn key_path(&self) -> PathBuf {
         self.data_dir.join("key.pem")
+    }
+}
+
+/// 卫星模式 CLI 覆盖层。
+#[derive(Debug, Default)]
+pub struct SatelliteOverrides {
+    pub core: Option<String>,
+    pub listen: Option<String>,
+    pub advertise: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
+/// 卫星模式配置: 纯转发, 无状态目录; relay 令牌与指纹只走 env (NFR: 敏感字段不进文件)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SatelliteConfig {
+    /// 核心中继拨号地址 host:port (不含 scheme)。
+    pub core: String,
+    pub listen: SocketAddr,
+    /// 对节点公布的拨号地址 (注册时自报, 无缺省值)。
+    pub advertise: SocketAddr,
+    pub fingerprint: String,
+    /// env KUNXTIER_RELAY_TOKEN; 不接受 CLI / 文件来源。
+    pub token: String,
+}
+
+impl SatelliteConfig {
+    /// 分层同 RelayConfig; listen / advertise 复用同一组键, advertise 缺省取具体监听地址。
+    pub fn resolve(
+        cli: SatelliteOverrides,
+        env: impl Fn(&str) -> Option<String>,
+        file: FileConfig,
+    ) -> Result<Self> {
+        let pick = |cli_v: Option<String>,
+                    env_key: &str,
+                    file_v: Option<String>,
+                    default: &str|
+         -> Option<String> {
+            Some(
+                cli_v
+                    .or_else(|| env(env_key).filter(|s| !s.is_empty()))
+                    .or(file_v)
+                    .unwrap_or_else(|| default.to_string()),
+            )
+            .filter(|s| !s.is_empty())
+        };
+        let core = pick(cli.core, ENV_CORE, None, "")
+            .ok_or_else(|| {
+                Error::Config("卫星模式必须指定核心地址 (--core 或 KUNXTIER_CORE)".into())
+            })?
+            .trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_string();
+        let listen: SocketAddr = pick(cli.listen, ENV_LISTEN, file.listen, DEFAULT_LISTEN)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| Error::Config("listen 不是合法的 SocketAddr".into()))?;
+        let advertise = pick(cli.advertise, ENV_ADVERTISE, file.advertise, "")
+            .and_then(|s| s.parse().ok())
+            .or((!listen.ip().is_unspecified()).then_some(listen))
+            .ok_or_else(|| {
+                Error::Config("卫星模式必须指定公布地址 (--advertise 或 KUNXTIER_ADVERTISE)".into())
+            })?;
+        let fingerprint = pick(cli.fingerprint, ENV_FINGERPRINT, None, "").ok_or_else(|| {
+            Error::Config(
+                "卫星模式必须指定核心证书指纹 (--fingerprint 或 KUNXTIER_FINGERPRINT)".into(),
+            )
+        })?;
+        let token = env(ENV_RELAY_TOKEN)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Config("卫星模式必须设置 KUNXTIER_RELAY_TOKEN".into()))?;
+        Ok(SatelliteConfig {
+            core,
+            listen,
+            advertise,
+            fingerprint,
+            token,
+        })
     }
 }
 
@@ -116,12 +218,14 @@ mod tests {
         let file = FileConfig {
             listen: Some("2.2.2.2:2222".into()),
             data_dir: Some("./from-file".into()),
+            advertise: None,
         };
 
         // 三层齐设: CLI 胜出
         let cli = CliOverrides {
             listen: Some("3.3.3.3:3333".into()),
             data_dir: Some("./from-cli".into()),
+            advertise: None,
         };
         let cfg = RelayConfig::resolve(cli, env, file.clone()).unwrap();
         assert_eq!(cfg.listen.to_string(), "3.3.3.3:3333");
@@ -144,6 +248,7 @@ mod tests {
         let file = FileConfig {
             listen: Some("2.2.2.2:2222".into()),
             data_dir: None,
+            advertise: None,
         };
         let cfg = RelayConfig::resolve(CliOverrides::default(), env, file).unwrap();
         assert_eq!(cfg.listen.to_string(), "2.2.2.2:2222");
@@ -154,7 +259,78 @@ mod tests {
         let cli = CliOverrides {
             listen: Some("not-a-socket".into()),
             data_dir: None,
+            advertise: None,
         };
         assert!(RelayConfig::resolve(cli, no_env, FileConfig::default()).is_err());
+    }
+
+    #[test]
+    fn builtin_addr_prefers_advertise_then_concrete_listen() {
+        let mk = |listen: &str, advertise: Option<&str>| RelayConfig {
+            listen: listen.parse().unwrap(),
+            advertise: advertise.map(|a| a.parse().unwrap()),
+            data_dir: PathBuf::from("./kunxtier-state"),
+        };
+        // advertise 显式指定: 直接采用
+        assert_eq!(
+            mk("0.0.0.0:443", Some("1.2.3.4:9443"))
+                .builtin_addr()
+                .unwrap(),
+            "1.2.3.4:9443".parse().unwrap()
+        );
+        // 具体监听地址可对外时取监听地址
+        assert_eq!(
+            mk("127.0.0.1:9443", None).builtin_addr().unwrap(),
+            "127.0.0.1:9443".parse().unwrap()
+        );
+        // 通配监听且未配置: 无公布地址 (节点以自身核心地址代入)
+        assert_eq!(mk("0.0.0.0:443", None).builtin_addr(), None);
+    }
+
+    #[test]
+    fn satellite_resolves_layers_and_requires_sensitive_env() {
+        let env = |k: &str| match k {
+            ENV_RELAY_TOKEN => Some("kxt_relay_secret".into()),
+            _ => None,
+        };
+        // advertise 缺省取具体监听地址; core 容忍 https:// 前缀
+        let cli = SatelliteOverrides {
+            core: Some("https://5.6.7.8:9443".into()),
+            listen: Some("127.0.0.1:8443".into()),
+            advertise: None,
+            fingerprint: Some("ab".repeat(32)),
+        };
+        let cfg = SatelliteConfig::resolve(cli, env, FileConfig::default()).unwrap();
+        assert_eq!(cfg.core, "5.6.7.8:9443");
+        assert_eq!(cfg.listen.to_string(), "127.0.0.1:8443");
+        assert_eq!(cfg.advertise.to_string(), "127.0.0.1:8443");
+
+        // 令牌只认 env: 缺失即拒绝, 不回落其他层
+        let no_token = |_: &str| None::<String>;
+        assert!(SatelliteConfig::resolve(
+            SatelliteOverrides {
+                core: Some("5.6.7.8:9443".into()),
+                listen: Some("127.0.0.1:8443".into()),
+                advertise: Some("1.2.3.4:443".into()),
+                fingerprint: Some("ab".repeat(32)),
+            },
+            no_token,
+            FileConfig::default(),
+        )
+        .is_err());
+
+        // 通配监听且无 advertise: 拒绝启动
+        let env2 = |k: &str| (k == ENV_RELAY_TOKEN).then(|| "kxt_relay_secret".to_string());
+        assert!(SatelliteConfig::resolve(
+            SatelliteOverrides {
+                core: Some("5.6.7.8:9443".into()),
+                listen: None,
+                advertise: None,
+                fingerprint: Some("ab".repeat(32)),
+            },
+            env2,
+            FileConfig::default(),
+        )
+        .is_err());
     }
 }

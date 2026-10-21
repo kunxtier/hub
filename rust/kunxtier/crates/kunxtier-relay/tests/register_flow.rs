@@ -12,6 +12,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use kunxtier_core::config::RelayConfig;
+use kunxtier_core::protocol::SignalRelay;
 use kunxtier_relay::client_tls::pinning_agent;
 use kunxtier_relay::server::{build_router, AppState};
 use kunxtier_relay::store::Store;
@@ -20,14 +21,22 @@ async fn start_relay(dir: &Path) -> (SocketAddr, String, String) {
     let cfg = RelayConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
+        advertise: None,
     };
     let out = kunxtier_relay::init(&cfg).unwrap();
-    let state = Arc::new(AppState::new(Store::open(&cfg.db_path()).unwrap()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = Arc::new(AppState::new(
+        Store::open(&cfg.db_path()).unwrap(),
+        SignalRelay {
+            addr: addr.to_string(),
+            kind: "core".into(),
+            fingerprint: out.fingerprint.clone(),
+        },
+    ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
         .unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
     let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
     // 多线程 runtime: 测试主线程做阻塞 HTTP 调用, 服务端任务由 worker 驱动
     tokio::spawn(async move {

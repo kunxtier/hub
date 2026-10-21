@@ -1,4 +1,4 @@
-//! Description: HTTPS 服务: 管理区 (admin 鉴权) + 节点注册区 (一次性令牌 + 限速) + 信令 WS。
+//! Description: HTTPS 服务: 管理区 (admin 鉴权) + 节点注册区 (一次性令牌 + 限速) + 信令 WS + 转发 WS + 卫星注册。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-20
@@ -20,13 +20,16 @@ use kunxtier_core::address;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::{
     ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest, IssueTokenResponse,
-    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest,
+    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest, SignalRelay,
+    SignalServerMsg,
 };
 
+use crate::forward::ForwardRegistry;
 use crate::ratelimit::RateLimiter;
+use crate::satellite::SatelliteRegistry;
 use crate::signaling::OnlineRegistry;
 use crate::store::Store;
-use crate::Error;
+use crate::{cert, Error};
 
 pub struct AppState {
     store: Mutex<Store>,
@@ -34,20 +37,29 @@ pub struct AppState {
     register_limiter: RateLimiter,
     /// admin 认证失败计数: 20 次 / 分钟 / 源。
     admin_limiter: RateLimiter,
-    /// 信令 WS 建连限速 (成功也计数): 20 次 / 分钟 / 源 (NFR-9)。
+    /// 信令 / 转发 / 卫星 WS 建连限速 (成功也计数): 20 次 / 分钟 / 源 (NFR-9)。
     pub(crate) ws_limiter: RateLimiter,
     /// 在线节点注册表 (信令会话持有, admin 列表合并在线态)。
     pub(crate) online: OnlineRegistry,
+    /// 内置转发注册表 (/ws/relay)。
+    pub(crate) forward: ForwardRegistry,
+    /// 在线卫星注册表 (/ws/satellite)。
+    pub(crate) satellites: SatelliteRegistry,
+    /// 内置转发条目 (中继列表末位兜底, run 时按配置与证书装配)。
+    pub(crate) builtin: SignalRelay,
 }
 
 impl AppState {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, builtin: SignalRelay) -> Self {
         AppState {
             store: Mutex::new(store),
             register_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             admin_limiter: RateLimiter::new(20, Duration::from_secs(60)),
             ws_limiter: RateLimiter::new(20, Duration::from_secs(60)),
             online: OnlineRegistry::new(),
+            forward: ForwardRegistry::new(),
+            satellites: SatelliteRegistry::new(),
+            builtin,
         }
     }
 
@@ -57,6 +69,21 @@ impl AppState {
     /// 快速失败优于带病继续服务。
     pub(crate) fn lock_store(&self) -> MutexGuard<'_, Store> {
         self.store.lock().unwrap()
+    }
+
+    /// 当前中继列表: 卫星按地址序在前, 内置转发恒在末位兜底 (FR-3)。
+    pub(crate) fn relay_list(&self) -> Vec<SignalRelay> {
+        let mut relays = self.satellites.list();
+        relays.push(self.builtin.clone());
+        relays
+    }
+
+    /// 中继列表变化全网广播 (卫星注册 / 摘除 / 踢线)。
+    pub(crate) fn broadcast_relays(&self) {
+        let msg = SignalServerMsg::Relays {
+            relays: self.relay_list(),
+        };
+        self.online.broadcast_all(msg);
     }
 }
 
@@ -142,6 +169,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/nodes", get(list_nodes))
         .route("/api/admin/nodes/remove", post(remove_node))
         .route("/ws/signal", get(crate::signaling::ws_handler))
+        .route("/ws/relay", get(crate::forward::core_ws_handler))
+        .route("/ws/satellite", get(crate::satellite::ws_handler))
         .with_state(state)
 }
 
@@ -260,7 +289,11 @@ async fn revoke_token(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&state, addr.ip(), &headers)?;
-    state.lock_store().revoke_token(id)?;
+    let kind = state.lock_store().revoke_token(id)?;
+    // relay 令牌撤销即踢线: 持该令牌的卫星断开, 列表实时收窄 (FR-18 / NFR 吊销即断)
+    if kind == "relay" && state.satellites.kick_by_token(id) > 0 {
+        state.broadcast_relays();
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -307,7 +340,22 @@ async fn remove_node(
 pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let store = Store::open(&cfg.db_path())?;
-    let state = Arc::new(AppState::new(store));
+    // 内置转发条目: 公布地址 + 自身证书指纹 (节点按条目固定校验)
+    let cert_pem = std::fs::read_to_string(cfg.cert_path())
+        .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;
+    let fingerprint = cert::fingerprint(&cert::der_from_pem(&cert_pem)?);
+    let builtin_addr = cfg.builtin_addr();
+    if builtin_addr.is_none() {
+        tracing::info!("通配监听且未配置 advertise: 内置转发条目地址置空, 节点以自身核心地址代入");
+    }
+    let state = Arc::new(AppState::new(
+        store,
+        SignalRelay {
+            addr: builtin_addr.map(|a| a.to_string()).unwrap_or_default(),
+            kind: "core".into(),
+            fingerprint,
+        },
+    ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
         .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;

@@ -5,8 +5,8 @@
 ## 当前项目
 
 - rust/kunxtier: 轻量 P2P 虚拟组网 (ZeroTier / EasyTier 平替)。cargo workspace:
-  - kunxtier-core: 协议消息 / 凭证与令牌 / 地址分配 / 分层配置
-  - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 自签 TLS / 限速 / 备份)
+  - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置
+  - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
   - kunxtier-cli: 单一入口二进制 `kunxtier`
   - kunxtier-node (数据面) 与 web/kunxtier-console (控制台前端) 按阶段推进再落地
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
@@ -20,6 +20,8 @@ cargo test
 # 本地试跑 (避免 443 权限问题, 指定高位端口)
 cargo run -p kunxtier-cli --bin kunxtier -- relay --init --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
 cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
+# 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发)
+KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地址> --fingerprint <核心指纹> --advertise <对外地址>
 
 # 任务编排 (cargo-make, rust/kunxtier/Makefile.toml, 按领域划分)
 cargo make --list-all-steps   # 查看全部任务

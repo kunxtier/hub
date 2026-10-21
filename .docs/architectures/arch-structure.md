@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-20, ik-advance --init)
+## 当前实际结构 (2026-10-21, ik-advance T05)
 
 ```text
 hub/
@@ -48,9 +48,10 @@ hub/
 │   ├── Cargo.toml                # workspace 根 + 统一依赖版本
 │   ├── Makefile.toml             # cargo-make 任务集 (构建 / 质量 / 测试 / 运行 / 发布)
 │   └── crates/
-│       ├── kunxtier-core/        # 协议 / 凭证令牌 / 地址 / 分层配置
-│       ├── kunxtier-relay/       # 核心中继: store + server + init + cert + ratelimit + client_tls + error
-│       └── kunxtier-cli/         # 二进制 kunxtier: relay / admin 子命令
+│       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig)
+│       ├── kunxtier-relay/       # 核心中继: store + server + init + cert + ratelimit + client_tls
+│       │                         #   + signaling (信令 WS) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
+│       └── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令
 ├── CLAUDE.md                     # 已创建
 └── web/                          # 未建 (控制台前端阶段落地)
 ```
@@ -60,4 +61,10 @@ hub/
 - 2026-10-20 (init): kunxtier-node crate 未建——数据面阶段再落地, 不预建空壳; web/ 同理。已交付切片: 控制面登记闭环 (init / HTTPS 管理 API / 节点注册 / 限速 / 备份)。
 - 已知妥协: store 用 std::sync::Mutex 包同步 SQLite, handler 内短临界区; 信令阶段的并发压力实际显现时再评估异步化。
 - 已知妥协: 限速器过期表项不主动清理, 源数量自然有界 (单机个人规模)。
+- 2026-10-21 (T04 信令 WS 后): forward / satellite 以独立模块落在 relay crate 内 (协议与注册表在 core / relay 的既有分层内), 未达拆分阈值。
+- 2026-10-21 (T05 转发双模式): 转发准入有意不对称——核心复用信令挑战应答 (IP 由库存权威决定, 不可声明), 卫星声明式 bind (零知识, NFR-5); 声明劫持面由 WG 端到端加密兜底。
+- 2026-10-21 (T05): 卫星无状态目录——证书每次启动临时生成, 指纹随注册上报并经中继列表分发; 节点按条目指纹固定校验, 免去卫星证书分发工序。
+- 2026-10-21 (T05): 中继列表顺序为协议语义——卫星在前 (按地址稳定序), 核心内置恒在末位兜底; 内置条目 addr 为空串时表示 "节点已连接的核心自身" (通配监听且未配 advertise 时出现)。
+- 2026-10-21 (T05): 卫星进程拆 start (返回实际监听地址与句柄) / run (CLI 前台) 两级, 供集成测试以真实进程形态起停。
+- 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

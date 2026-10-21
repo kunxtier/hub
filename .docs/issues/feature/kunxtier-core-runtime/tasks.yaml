@@ -17,7 +17,7 @@ tasks:
     owner: "SRV"
   - id: "T05"
     title: "kunxtier-relay 转发双模式: 核心内置中继 + 卫星纯转发 (relay 令牌注册/列表分发/断连摘除)"
-    status: "todo"
+    status: "done"
     owner: "SRV"
   - id: "T06"
     title: "kunxtier-node TUN 与 WireGuard 用户态引擎接入 (gotatun/boringtun + tun-rs 选型锁定)"
