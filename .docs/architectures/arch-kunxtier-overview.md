@@ -69,6 +69,15 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 6. 控制台接入: 浏览器直开核心中继托管的页面, 或在任意机器 `kunxtier console --relay <addr>` 起本地控制台; 两者同一套静态资源与 admin API, 行为等价, 均含网络组切换
 7. 恢复与维持: 直连与中继链路按保活策略维持 (persistent keepalive 与 WS 心跳); 周期性重试直连; 信令断线自动重连; 核心中继重启不要求节点与卫星重启; 卫星断连即从列表摘除
 
+## 可观测性
+
+可观测性基线 (需求见 nfr-kunxtier-observability): 分级结构化日志 + status 排障视图, 不引入指标与追踪体系。
+
+- 日志基建: tracing 统一埋点, subscriber 只在 kunxtier-cli main 初始化一次 (四种进程角色共用); 级别优先级遵循全局分层 CLI flag > config (relay 配置文件) > ENV (RUST_LOG) > 默认 info。daemon 默认输出 stderr (服务化后由 systemd / launchd journal 接管), `--log-file` 显式启用文件输出, 启用时 stderr / 文件双写, 文件按大小轮转保留一份历史
+- 节点事件环: kunxtier-node 内维护有界 NodeEvent 环形缓冲 (时间戳 / 类别 / peer / detail), 只记打洞、路径切换、信令、注册四类关键事件; 事件产生点同源双写 tracing 与环; 对端最近失败原因与中继选择过程从环推导, 不另存第二份状态源; `status --verbose` 经本地 IPC 拉取事件环与当前路径状态
+- relay 侧: 只补齐事件日志 (节点注册 / 凭证吊销 / 令牌校验失败 / 卫星注册与摘除 / admin 登录失败), 不建事件环
+- 脱敏: 日志字段按 nfr-kunxtier-security NFR-4 审计, 令牌 / 私钥 / 凭证一律脱敏形式
+
 ## 设计原则与约束
 
 - relay 即中枢: 核心中继是唯一管理权威, relay + daemon 即闭环; network 是中继内的一等隔离域, 网络组间不互通不可见; 控制台与卫星中继都是可插拔扩展, 不改变闭环
@@ -98,3 +107,5 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 | 公共 STUN vs 自建 | 首发公共 STUN, 核心可配置列表 | 减少部署组件; STUN 无鉴权语义, 不构成信任边界问题 |
 | 证书: 默认自签 + CLI 指纹固定, 可选 ACME | 自签优先 | 免域名开箱即用; 浏览器侧自签需首次手动信任, 有域名用户可走 ACME |
 | 打洞成功率 | 不追求 100%, 策略可强制中继 | 对称 NAT 等场景依赖中继, 属设计内行为; 强制中继覆盖出口不稳定场景 |
+| 排障事件: daemon 内存事件环 vs 解析日志文件 | 内存事件环 | status --verbose 免文件解析、内存有界、IPC 直取; 代价是进程重启即清零, 历史回看仍依赖日志文件 |
+| daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转, 服务化后 journal 天然接管; 代价是手动后台运行时需显式开文件或自行重定向 |

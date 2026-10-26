@@ -6,6 +6,7 @@
 use std::fmt;
 
 /// code 语义: 2 = 用法 / 配置错误, 1 = 运行失败
+#[derive(Debug)]
 pub struct Fail {
     pub code: i32,
     message: String,

@@ -57,5 +57,5 @@ tasks:
     owner: "CLI"
   - id: "T15"
     title: "可观测性基础: 分级结构化日志、关键事件留痕 (打洞/路径切换/信令/凭证)、status --verbose"
-    status: "todo"
+    status: "done"
     owner: "CORE"

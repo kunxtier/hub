@@ -14,9 +14,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::events::EventRecord;
+
 /// IPC socket 文件名 (位于 state 目录内)。
 pub const IPC_SOCKET: &str = "daemon.sock";
-/// 单行帧上限: status 快照远小于此, 超限视为异常客户端直接断开。
+/// 单行帧上限: status 快照与 verbose 事件环 (256 条) 均远小于此, 超限视为异常客户端直接断开。
 const MAX_LINE: usize = 64 * 1024;
 
 pub fn socket_path(state_dir: &Path) -> PathBuf {
@@ -41,6 +43,8 @@ pub enum IpcRequest {
     Down,
     /// 状态快照。
     Status,
+    /// 状态快照 + 关键事件留痕 (status --verbose 排障视图)。
+    StatusVerbose,
 }
 
 /// daemon → 客户端。
@@ -57,6 +61,9 @@ pub struct IpcResponse {
     /// status 成功时的快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<IpcStatus>,
+    /// status_verbose 成功时的关键事件 (旧 → 新)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<EventRecord>>,
 }
 
 impl IpcResponse {
@@ -67,6 +74,7 @@ impl IpcResponse {
             ip: None,
             network: None,
             status: None,
+            events: None,
         }
     }
 
@@ -77,6 +85,7 @@ impl IpcResponse {
             ip: Some(ip),
             network: Some(network),
             status: None,
+            events: None,
         }
     }
 
@@ -87,6 +96,7 @@ impl IpcResponse {
             ip: None,
             network: None,
             status: None,
+            events: None,
         }
     }
 
@@ -97,6 +107,19 @@ impl IpcResponse {
             ip: None,
             network: None,
             status: Some(status),
+            events: None,
+        }
+    }
+
+    /// status --verbose: 快照 + 关键事件 (旧 → 新)。
+    pub fn verbose(status: IpcStatus, events: Vec<EventRecord>) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            ip: None,
+            network: None,
+            status: Some(status),
+            events: Some(events),
         }
     }
 }
@@ -235,6 +258,7 @@ pub async fn request(path: &Path, req: &IpcRequest) -> io::Result<IpcResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::EventKind;
 
     #[tokio::test]
     async fn frame_roundtrips_request_and_response() {
@@ -285,6 +309,44 @@ mod tests {
             serde_json::from_str(String::from_utf8(buf).unwrap().trim_end()).unwrap();
         assert!(back.ok);
         assert_eq!(back.status.unwrap().peers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verbose_roundtrips_status_with_events() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_frame(&mut buf, &IpcRequest::StatusVerbose)
+            .await
+            .unwrap();
+        let parsed: IpcRequest =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim_end()).unwrap();
+        assert!(matches!(parsed, IpcRequest::StatusVerbose));
+
+        let resp = IpcResponse::verbose(
+            IpcStatus {
+                online: false,
+                offline_reason: None,
+                fatal: None,
+                network: None,
+                name: None,
+                own_ip: None,
+                policy: None,
+                peers: Vec::new(),
+            },
+            vec![EventRecord {
+                ts: 42,
+                kind: EventKind::Punch,
+                peer: Some("peer".into()),
+                detail: "打洞超时, 回落中继".into(),
+            }],
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        write_frame(&mut buf, &resp).await.unwrap();
+        let back: IpcResponse =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim_end()).unwrap();
+        let events = back.events.expect("verbose 应携带事件");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::Punch);
+        assert_eq!(events[0].peer.as_deref(), Some("peer"));
     }
 
     #[tokio::test]

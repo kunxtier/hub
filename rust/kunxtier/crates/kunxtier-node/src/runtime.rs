@@ -23,6 +23,7 @@ use kunxtier_core::protocol::{PathPolicy, SignalPeer, SignalRelay};
 
 use crate::engine::{build_engine_split, EngineOptions, PeerSpec, WgEngine};
 use crate::error::{Error, Result};
+use crate::events::{EventKind, EventRecord, EventRing};
 use crate::identity::WgIdentity;
 use crate::netconf;
 use crate::punch::{decode_probe, encode_probe, ProbeKind, PunchState, PunchToken};
@@ -85,6 +86,8 @@ pub struct NodeOptions {
     pub keepalive_secs: u16,
     /// 路径管理节奏 (保活 / 失活 / 重试 / 打洞窗口)。
     pub timings: PathTimings,
+    /// 关键事件留痕环 (status --verbose 数据源); 由 daemon 创建并跨会话复用。
+    pub events: Arc<EventRing>,
 }
 
 /// 单 peer 路径状态快照 (status 输出)。
@@ -111,6 +114,7 @@ pub struct NodeStatus {
 #[derive(Clone)]
 pub struct NodeHandle {
     status: Arc<Mutex<NodeStatus>>,
+    events: Arc<EventRing>,
     cancel: watch::Sender<bool>,
     done: watch::Sender<Option<String>>,
 }
@@ -118,6 +122,11 @@ pub struct NodeHandle {
 impl NodeHandle {
     pub fn status(&self) -> NodeStatus {
         self.status.lock().expect("NodeStatus 锁中毒").clone()
+    }
+
+    /// 关键事件快照 (旧 → 新), status --verbose 数据源。
+    pub fn events(&self) -> Vec<EventRecord> {
+        self.events.snapshot()
     }
 
     /// 停机: 事件循环退出, 引擎与中继会话收尾。
@@ -191,12 +200,19 @@ where
     let (client, _signal_task) = SignalClient::connect(signal_options)
         .await
         .map_err(|e| Error::Transport(format!("信令通道建立失败: {e}")))?;
+    options.events.push(
+        EventKind::Signal,
+        Some(&options.name),
+        format!("信令通道建立 (核心 {})", options.core),
+    );
 
     let status = Arc::new(Mutex::new(NodeStatus::default()));
+    let events = options.events.clone();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (done_tx, _done_rx) = watch::channel(None);
     let handle = NodeHandle {
         status: status.clone(),
+        events: events.clone(),
         cancel: cancel_tx,
         done: done_tx.clone(),
     };
@@ -210,6 +226,7 @@ where
         relays: Vec::new(),
         tunnels: HashMap::new(),
         status,
+        events,
         done: done_tx,
     };
     tokio::spawn(runtime.run(probe, stun, activity, cancel_rx));
@@ -234,6 +251,8 @@ where
     relays: Vec<SignalRelay>,
     tunnels: HashMap<u8, RelayTunnel>,
     status: Arc<Mutex<NodeStatus>>,
+    /// 关键事件留痕环 (与 handle 共享同一实例)。
+    events: Arc<EventRing>,
     /// 退出原因通知 (handle.done 的发送端)。
     done: watch::Sender<Option<String>>,
 }
@@ -258,6 +277,7 @@ where
             stun_rx,
             stun_cmd_rx,
             self.client.cmd.clone(),
+            self.events.clone(),
         ));
 
         let mut probe_tick = tokio::time::interval(PROBE_INTERVAL);
@@ -271,6 +291,7 @@ where
                 ev = self.client.events.recv() => {
                     match ev {
                         Some(NodeEvent::Closed(reason)) => {
+                            self.note(EventKind::Signal, None, format!("信令通道关闭: {reason}"));
                             break format!("信令通道关闭: {reason}");
                         }
                         Some(event) => {
@@ -358,6 +379,7 @@ where
                 self.merge_nodes(vec![peer]).await;
             }
             NodeEvent::PeerOffline { name } => {
+                self.note(EventKind::Signal, Some(&name), "对端离线");
                 if let Some(entry) = self.peers.get_mut(&name) {
                     entry.online = false;
                     entry.candidates.clear();
@@ -450,6 +472,11 @@ where
             .unwrap_or(PathPolicy::Auto)
     }
 
+    /// 关键事件留痕: 与既有 tracing 埋点同位双写 (日志字段结构不变, 环供排障视图)。
+    fn note(&self, kind: EventKind, peer: Option<&str>, detail: impl Into<String>) {
+        self.events.push(kind, peer, detail);
+    }
+
     /// 策略切换: 强制中继取消打洞并全量回落; 恢复自动时对在线节点重启打洞。
     async fn apply_policy(&mut self, policy: PathPolicy) {
         {
@@ -463,10 +490,12 @@ where
         match policy {
             PathPolicy::ForceRelay => {
                 tracing::info!("路径策略切换为强制中继 (FR-10)");
+                self.note(EventKind::Path, None, "路径策略切换为强制中继");
                 self.enforce_force_relay(&names).await;
             }
             PathPolicy::Auto => {
                 tracing::info!("路径策略切换为自动 (直连优先)");
+                self.note(EventKind::Path, None, "路径策略切换为自动 (直连优先)");
                 for name in names {
                     // 强制中继恢复自动: 以既有中继路径为 fallback 立即重打洞,
                     // 由打洞裁决是否回直连 (FR-10 恢复语义); direct 节点不受影响
@@ -563,6 +592,13 @@ where
                 };
             }
         }
+        if became_direct {
+            self.note(
+                EventKind::Punch,
+                Some(&name),
+                format!("打洞成功, 切换直连 ({from})"),
+            );
+        }
         self.reverse.insert(from, name.clone());
         if learn_endpoint {
             let _ = self.engine.set_endpoint(&public_key, Some(from)).await;
@@ -608,6 +644,13 @@ where
                 *endpoint = source;
                 *last_alive = now;
             }
+        }
+        if punching {
+            self.note(
+                EventKind::Punch,
+                Some(&name),
+                format!("打洞成功, 切换直连 ({source})"),
+            );
         }
         self.refresh_status();
     }
@@ -695,6 +738,7 @@ where
         });
         if let Some(pseudo) = fallback {
             tracing::info!(peer = %name, "重试打洞未果, 保持中继 (FR-6)");
+            self.note(EventKind::Punch, Some(&name), "重试打洞未果, 保持中继");
             if let Some(entry) = self.peers.get_mut(&name) {
                 entry.state = PunchState::Relayed {
                     endpoint: pseudo,
@@ -713,6 +757,11 @@ where
         match self.pick_relay(vip) {
             Some(pseudo) => {
                 tracing::info!(peer = %name, relay_endpoint = %pseudo, "打洞超时, 回落中继 (FR-3)");
+                self.note(
+                    EventKind::Punch,
+                    Some(&name),
+                    format!("打洞超时, 回落中继 ({pseudo})"),
+                );
                 if let Some(entry) = self.peers.get_mut(&name) {
                     entry.state = PunchState::Relayed {
                         endpoint: pseudo,
@@ -723,6 +772,11 @@ where
             }
             None => {
                 tracing::warn!(peer = %name, "打洞超时且无可用中继, 保持等待");
+                self.note(
+                    EventKind::Punch,
+                    Some(&name),
+                    "打洞超时且无可用中继, 等待候选或中继",
+                );
                 if let Some(entry) = self.peers.get_mut(&name) {
                     entry.state = PunchState::Idle;
                 }
@@ -745,6 +799,11 @@ where
         match self.pick_relay(vip) {
             Some(pseudo) => {
                 tracing::warn!(peer = %name, relay_endpoint = %pseudo, "直连失活, 回落中继 (FR-6)");
+                self.note(
+                    EventKind::Path,
+                    Some(&name),
+                    format!("直连失活, 回落中继 ({pseudo})"),
+                );
                 if let Some(entry) = self.peers.get_mut(&name) {
                     entry.state = PunchState::Relayed {
                         endpoint: pseudo,
@@ -755,6 +814,11 @@ where
             }
             None => {
                 tracing::warn!(peer = %name, "直连失活且无可用中继, 回到等待");
+                self.note(
+                    EventKind::Path,
+                    Some(&name),
+                    "直连失活且无可用中继, 回到等待",
+                );
                 if let Some(entry) = self.peers.get_mut(&name) {
                     entry.state = PunchState::Idle;
                 }
@@ -848,6 +912,11 @@ where
             let old_addr = tunnel.endpoint.addr.clone();
             tunnel.shutdown(&self.hub);
             tracing::info!(id, old = %old_addr, new = %endpoint.addr, "中继条目变更, 重建通道");
+            self.note(
+                EventKind::Path,
+                None,
+                format!("中继 {id} 条目变更, 重建通道"),
+            );
             self.repoint_relayed(id).await;
         }
     }
@@ -870,15 +939,26 @@ where
         match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect).await {
             Ok(Ok(tunnel)) => {
                 tracing::info!(id, relay = %endpoint.addr, kind = %endpoint.kind, "中继通道就绪");
+                self.note(
+                    EventKind::Path,
+                    None,
+                    format!("中继 {id} 通道就绪 ({})", endpoint.addr),
+                );
                 self.tunnels.insert(id, tunnel);
                 true
             }
             Ok(Err(e)) => {
                 tracing::warn!(id, relay = %endpoint.addr, error = %e, "中继通道建立失败, 待下轮重试");
+                self.note(
+                    EventKind::Path,
+                    None,
+                    format!("中继 {id} 通道建立失败 ({e})"),
+                );
                 false
             }
             Err(_) => {
                 tracing::warn!(id, relay = %endpoint.addr, "中继通道建立超时, 待下轮重试");
+                self.note(EventKind::Path, None, format!("中继 {id} 通道建立超时"));
                 false
             }
         }
@@ -925,6 +1005,11 @@ where
             }
             match self.pick_relay(vip) {
                 Some(pseudo) => {
+                    self.note(
+                        EventKind::Path,
+                        Some(&name),
+                        format!("中继 {id} 失联, 重指中继 ({pseudo})"),
+                    );
                     if let Some(entry) = self.peers.get_mut(&name) {
                         entry.state = PunchState::Relayed {
                             endpoint: pseudo,
@@ -1003,6 +1088,7 @@ async fn stun_loop(
     mut events: mpsc::Receiver<StunEvent>,
     mut cmd: mpsc::Receiver<Vec<String>>,
     signal: mpsc::Sender<SignalCmd>,
+    ring: Arc<EventRing>,
 ) {
     while let Some(servers) = cmd.recv().await {
         let Some(udp) = hub.udp() else {
@@ -1011,6 +1097,7 @@ async fn stun_loop(
         let mapped = stun::probe_mapped_addresses(&servers, udp, &mut events).await;
         if mapped.is_empty() {
             tracing::warn!("STUN 探测无结果, 候选地址为空");
+            ring.push(EventKind::Punch, None, "STUN 探测无结果, 候选地址为空");
         }
         let candidates: Vec<String> = mapped.iter().map(|a| a.to_string()).collect();
         let _ = signal.send(SignalCmd::Announce(candidates)).await;

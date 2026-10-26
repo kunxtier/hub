@@ -15,6 +15,7 @@ use clap::Args;
 use tokio::sync::watch;
 
 use kunxtier_node::daemon::{serve, DaemonOptions, TunAdapterFactory};
+use kunxtier_node::events::EventRecord;
 use kunxtier_node::ipc::{self, IpcRequest, IpcResponse, IpcStatus};
 
 use super::error::Fail;
@@ -32,6 +33,12 @@ pub struct DaemonArgs {
     /// WG 固定监听端口 (缺省首次注册时自动选择并随 state 持久化)
     #[arg(long)]
     pub listen_port: Option<u16>,
+    /// 日志级别 error/warn/info/debug/trace (覆盖 RUST_LOG)
+    #[arg(long)]
+    pub log_level: Option<String>,
+    /// 日志文件路径 (启用后 stderr / 文件双写, 按大小轮转保留一份 .old)
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 }
 
 /// 首次注册并连接; 令牌一次性, 需 daemon 在运行 (FR-2)。
@@ -66,6 +73,9 @@ pub struct DownArgs {
 pub struct StatusArgs {
     #[arg(long, env = "KUNXTIER_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
     pub state_dir: PathBuf,
+    /// 排障视图: 附带最近关键事件 (打洞 / 路径 / 信令 / 注册)
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 impl DaemonArgs {
@@ -135,14 +145,20 @@ impl DownArgs {
 
 impl StatusArgs {
     pub fn execute(self) -> Result<(), Fail> {
-        let resp = call_daemon(&self.state_dir, IpcRequest::Status)?;
+        let req = if self.verbose {
+            IpcRequest::StatusVerbose
+        } else {
+            IpcRequest::Status
+        };
+        let resp = call_daemon(&self.state_dir, req)?;
         match resp {
             IpcResponse {
                 ok: true,
                 status: Some(status),
+                events,
                 ..
             } => {
-                print_status(&status);
+                print_status(&status, events.as_deref());
                 Ok(())
             }
             other => Err(Fail::runtime(
@@ -169,7 +185,7 @@ fn call_daemon(state_dir: &Path, req: IpcRequest) -> Result<IpcResponse, Fail> {
     }
 }
 
-fn print_status(status: &IpcStatus) {
+fn print_status(status: &IpcStatus, events: Option<&[EventRecord]>) {
     match (&status.name, &status.network) {
         (Some(name), Some(network)) => {
             let state = if status.online { "在线" } else { "离线" };
@@ -197,6 +213,15 @@ fn print_status(status: &IpcStatus) {
         for peer in &status.peers {
             let endpoint = peer.endpoint.as_deref().unwrap_or("-");
             println!("{}\t{}\t{}\t{}", peer.name, peer.ip, peer.path, endpoint);
+        }
+    }
+    if let Some(events) = events.filter(|e| !e.is_empty()) {
+        println!("最近事件 (旧 → 新):");
+        for ev in events {
+            match &ev.peer {
+                Some(peer) => println!("[{}] {}\t{}\t{}", ev.ts, ev.kind, peer, ev.detail),
+                None => println!("[{}] {}\t-\t{}", ev.ts, ev.kind, ev.detail),
+            }
         }
     }
 }

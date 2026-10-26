@@ -24,9 +24,10 @@ use tokio::task::JoinHandle;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::SignalRelay;
 use kunxtier_node::daemon::{serve, DaemonOptions, TunFactory};
+use kunxtier_node::events::EventRecord;
 use kunxtier_node::ipc::{self, IpcRequest, IpcResponse, IpcStatus};
 use kunxtier_node::state::{NodeState, STATE_FILE};
-use kunxtier_node::{Result, DEFAULT_MTU};
+use kunxtier_node::{EventKind, Result, DEFAULT_MTU};
 
 /// 核心中继实例: 服务跑在独立子 runtime 上——升级后的 WS 连接不归
 /// axum-server Handle 管, 整体失联只能以 runtime 任务组丢弃模拟 (崩溃)。
@@ -286,6 +287,14 @@ async fn status(dir: &Path) -> IpcStatus {
     resp.status.expect("status 应携带快照")
 }
 
+/// status --verbose 的关键事件留痕 (旧 → 新)。
+async fn status_verbose(dir: &Path) -> Vec<EventRecord> {
+    let resp = ipc::request(&ipc::socket_path(dir), &IpcRequest::StatusVerbose)
+        .await
+        .expect("IPC 请求失败");
+    resp.events.expect("verbose 应携带事件")
+}
+
 /// 等待 online 达到期望态。
 async fn wait_online(dir: &Path, want: bool, timeout: Duration) -> IpcStatus {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -377,6 +386,21 @@ async fn up_down_re_register_and_restart_recover() {
     let st = wait_online(dir, true, Duration::from_secs(10)).await;
     assert_eq!(st.name.as_deref(), Some("laptop"));
     assert_eq!(st.own_ip.as_deref(), Some(ip.as_str()));
+
+    // verbose 排障视图: 注册与信令事件已留痕 (NFR FR-3)
+    let events = status_verbose(dir).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::Register && e.detail.contains("注册成功")),
+        "verbose 事件应含注册成功: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::Signal && e.detail.contains("信令通道建立")),
+        "verbose 事件应含信令建立: {events:?}"
+    );
 
     // 在线重复 up → 拒绝
     let resp = up(dir, Some(&issue_node_token(&core)), "laptop", None, None).await;

@@ -17,6 +17,9 @@ hooks-uninstall: ## 卸载 git hooks
 	git config --unset core.hooksPath || true
 	@echo "hooks 已卸载"
 
+fmt: ## rust 域格式化
+	cd rust/kunxtier && cargo make fmt
+
 lint: ## rust 域质量检查 (格式 + clippy)
 	cd rust/kunxtier && cargo make lint
 

@@ -205,9 +205,17 @@ async fn register(
         return Err(ApiError::too_many());
     }
     let (network, ip, node_credential) =
-        state
+        match state
             .lock_store()
-            .consume_node_token(&req.token, &req.name, &req.wg_public_key)?;
+            .consume_node_token(&req.token, &req.name, &req.wg_public_key)
+        {
+            Ok(out) => out,
+            Err(e) => {
+                // FR-4 / NFR-4: 留痕失败类别与来源, 不记录令牌 / 凭证明文
+                tracing::warn!(ip = %addr.ip(), node = %req.name, error = %e, "节点注册被拒");
+                return Err(e.into());
+            }
+        };
     // 注意: 不记录任何令牌 / 凭证明文 (NFR-4)
     tracing::info!(node = %req.name, network = %network, ip = %ip, "节点注册成功");
     Ok(Json(RegisterResponse {

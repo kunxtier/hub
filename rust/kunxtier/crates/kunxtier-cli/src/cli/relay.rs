@@ -12,6 +12,7 @@ use kunxtier_core::config::{
 };
 
 use super::error::Fail;
+use crate::logging::LogSpec;
 
 #[derive(Args)]
 pub struct RelayCommand {
@@ -39,6 +40,12 @@ pub struct RelayCommand {
     /// 状态数据目录 (覆盖 env / 配置文件)
     #[arg(long)]
     data_dir: Option<String>,
+    /// 日志级别 error/warn/info/debug/trace (覆盖配置文件与 RUST_LOG)
+    #[arg(long)]
+    log_level: Option<String>,
+    /// 日志文件路径 (启用后 stderr / 文件双写, 按大小轮转保留一份 .old)
+    #[arg(long)]
+    log_file: Option<PathBuf>,
     #[command(subcommand)]
     action: Option<RelayAction>,
 }
@@ -50,6 +57,23 @@ pub enum RelayAction {
 }
 
 impl RelayCommand {
+    /// 日志装配: flag 层 + 配置文件 log_level 层。
+    /// 文件预读失败时置 None, 正式加载的错误仍由 execute 报出。
+    pub fn log_spec(&self) -> (LogSpec, Option<String>) {
+        let config_level = self
+            .config
+            .as_deref()
+            .and_then(|p| FileConfig::load(p).ok())
+            .and_then(|f| f.log_level);
+        (
+            LogSpec {
+                level: self.log_level.clone(),
+                file: self.log_file.clone(),
+            },
+            config_level,
+        )
+    }
+
     pub fn execute(self) -> Result<(), Fail> {
         let file = match self.config.as_deref() {
             Some(p) => {

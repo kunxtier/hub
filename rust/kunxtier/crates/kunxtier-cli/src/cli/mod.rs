@@ -10,6 +10,7 @@ mod relay;
 
 use clap::{Parser, Subcommand};
 
+use crate::logging::LogSpec;
 pub use admin::AdminCommand;
 use error::Fail;
 pub use node::{DaemonArgs, DownArgs, StatusArgs, UpArgs};
@@ -43,6 +44,21 @@ pub enum Command {
 }
 
 impl Command {
+    /// 日志装配输入: 长驻进程 (relay / daemon) 携带 flag 层, relay 另取配置文件层。
+    pub fn log_spec(&self) -> (LogSpec, Option<String>) {
+        match self {
+            Command::Relay(cmd) => cmd.log_spec(),
+            Command::Daemon(args) => (
+                LogSpec {
+                    level: args.log_level.clone(),
+                    file: args.log_file.clone(),
+                },
+                None,
+            ),
+            _ => (LogSpec::default(), None),
+        }
+    }
+
     pub fn execute(self) -> Result<(), Fail> {
         match self {
             Command::Relay(cmd) => cmd.execute(),

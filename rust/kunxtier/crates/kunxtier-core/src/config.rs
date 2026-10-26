@@ -38,6 +38,8 @@ pub struct FileConfig {
     pub advertise: Option<String>,
     /// 公共 STUN 服务器列表 (host:port), 整组覆盖缺省。
     pub stun_servers: Option<Vec<String>>,
+    /// 日志级别 (error/warn/info/debug/trace); 进程级关注点, 不进 RelayConfig 运行时类型。
+    pub log_level: Option<String>,
 }
 
 impl FileConfig {
@@ -269,6 +271,7 @@ mod tests {
             data_dir: Some("./from-file".into()),
             advertise: None,
             stun_servers: None,
+            log_level: None,
         };
 
         // 三层齐设: CLI 胜出
@@ -300,9 +303,17 @@ mod tests {
             data_dir: None,
             advertise: None,
             stun_servers: None,
+            log_level: None,
         };
         let cfg = RelayConfig::resolve(CliOverrides::default(), env, file).unwrap();
         assert_eq!(cfg.listen.to_string(), "2.2.2.2:2222");
+    }
+
+    #[test]
+    fn log_level_parses_from_file_and_defaults_none() {
+        let cfg = toml::from_str::<FileConfig>("log_level = \"debug\"").unwrap();
+        assert_eq!(cfg.log_level.as_deref(), Some("debug"));
+        assert_eq!(FileConfig::default().log_level, None);
     }
 
     #[test]

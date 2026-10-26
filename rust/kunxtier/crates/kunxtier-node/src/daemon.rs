@@ -11,6 +11,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gotatun::tun::{IpRecv, IpSend};
@@ -18,6 +19,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::error::{Error, Result};
+use crate::events::{EventKind, EventRing};
 use crate::identity::WgIdentity;
 use crate::ipc::{self, IpcPeer, IpcRequest, IpcResponse, IpcStatus};
 use crate::netconf;
@@ -36,6 +38,8 @@ const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
 const IPC_DEADLINE: Duration = Duration::from_secs(30);
 /// down 后等待运行时退出的时限。
 const STOP_DEADLINE: Duration = Duration::from_secs(10);
+/// verbose 事件的序列化预算: 事件环加 IpcStatus 头部须落在 IPC 单行帧 64KB 内。
+const VERBOSE_EVENTS_BUDGET: usize = 56 * 1024;
 
 /// 会话 IP 层来源。
 pub trait TunFactory: Send + Sync {
@@ -104,6 +108,8 @@ struct Daemon<P: TunFactory> {
     offline_reason: Option<String>,
     fatal: Option<String>,
     backoff: Duration,
+    /// 关键事件留痕环 (跨会话复用, status --verbose 数据源)。
+    events: Arc<EventRing>,
 }
 
 /// 运行 daemon: 绑定 IPC → 自动恢复 → 事件循环, 直到 shutdown 置位。
@@ -134,12 +140,18 @@ where
         session: None,
         offline_reason: None,
         fatal: None,
+        events: Arc::new(EventRing::default()),
     };
 
     // FR-9: 有 state 即自动恢复上线 (核心暂不可达时经退避重连兜底)
     if daemon.node.is_some() {
         if let Err(e) = daemon.connect(&ev_tx).await {
             tracing::warn!(error = %e, "自动恢复上线失败, 进入退避重连");
+            daemon.events.push(
+                EventKind::Signal,
+                daemon.node.as_ref().map(|n| n.name.as_str()),
+                format!("自动恢复上线失败: {e}"),
+            );
             daemon.schedule_retry(ev_tx.clone());
         }
     }
@@ -220,6 +232,11 @@ impl<P: TunFactory> Daemon<P> {
                             if self.session.is_none() && self.node.is_some() && self.fatal.is_none() {
                                 if let Err(e) = self.connect(ev_tx).await {
                                     tracing::warn!(error = %e, "重连失败, 继续退避");
+                                    self.events.push(
+                                        EventKind::Signal,
+                                        self.node.as_ref().map(|n| n.name.as_str()),
+                                        format!("重连失败: {e}"),
+                                    );
                                     self.schedule_retry(ev_tx.clone());
                                 }
                             }
@@ -246,6 +263,10 @@ impl<P: TunFactory> Daemon<P> {
             } => self.handle_up(token, name, core, fingerprint, ev_tx).await,
             IpcRequest::Down => self.handle_down().await,
             IpcRequest::Status => IpcResponse::status(self.status_view()),
+            IpcRequest::StatusVerbose => IpcResponse::verbose(
+                self.status_view(),
+                self.events.snapshot_bounded(VERBOSE_EVENTS_BUDGET),
+            ),
         }
     }
 
@@ -372,11 +393,31 @@ impl<P: TunFactory> Daemon<P> {
         let fingerprint = state.fingerprint.clone();
         let token = token.to_string();
         let name = name.to_string();
-        let outcome = tokio::task::spawn_blocking(move || {
-            register::register(&core, &fingerprint, &token, &name, &public_key)
+        // 闭包移走副本, name 留给注册事件留痕
+        let reg_name = name.clone();
+        let outcome = match tokio::task::spawn_blocking(move || {
+            register::register(&core, &fingerprint, &token, &reg_name, &public_key)
         })
         .await
-        .map_err(|e| Error::Transport(format!("注册任务异常: {e}")))??;
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                self.events
+                    .push(EventKind::Register, Some(&name), format!("注册失败: {e}"));
+                return Err(e);
+            }
+            Err(e) => {
+                let err = Error::Transport(format!("注册任务异常: {e}"));
+                self.events
+                    .push(EventKind::Register, Some(&name), format!("注册失败: {err}"));
+                return Err(err);
+            }
+        };
+        self.events.push(
+            EventKind::Register,
+            Some(&name),
+            format!("注册成功: 网络 {} IP {}", outcome.network, outcome.ip),
+        );
         state.network = outcome.network;
         state.vip = outcome
             .ip
@@ -393,6 +434,11 @@ impl<P: TunFactory> Daemon<P> {
         session.handle.stop();
         await_exit(&session.handle).await;
         self.offline_reason = Some("本地断开 (down)".into());
+        self.events.push(
+            EventKind::Signal,
+            self.node.as_ref().map(|n| n.name.as_str()),
+            "本地断开 (down)",
+        );
         tracing::info!(
             node = self.node.as_ref().map(|n| n.name.as_str()).unwrap_or(""),
             "节点会话已断开 (down)"
@@ -431,6 +477,7 @@ impl<P: TunFactory> Daemon<P> {
                 listen_port: state.listen_port,
                 keepalive_secs: KEEPALIVE_SECS,
                 timings: PathTimings::default(),
+                events: self.events.clone(),
             },
             ip_tx,
             ip_rx,
@@ -449,6 +496,11 @@ impl<P: TunFactory> Daemon<P> {
             network = %state.network,
             vip = %state.vip,
             "节点会话建立"
+        );
+        self.events.push(
+            EventKind::Signal,
+            Some(&state.name),
+            format!("节点会话建立 (核心 {})", state.core),
         );
         Ok(())
     }
@@ -494,6 +546,15 @@ impl<P: TunFactory> Daemon<P> {
         }
         self.session = None;
         self.offline_reason = Some(reason.clone());
+        let node_name = self.node.as_ref().map(|n| n.name.as_str());
+        match fatal.as_deref() {
+            Some(f) => self
+                .events
+                .push(EventKind::Signal, node_name, format!("会话致命退出: {f}")),
+            None => self
+                .events
+                .push(EventKind::Signal, node_name, format!("会话退出: {reason}")),
+        }
         if let Some(fatal) = fatal {
             tracing::error!(%fatal, "会话致命退出, 停止重连 (down/up 亦拒绝, 处理后重启 daemon)");
             self.fatal = Some(fatal);

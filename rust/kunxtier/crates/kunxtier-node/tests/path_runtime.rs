@@ -224,6 +224,7 @@ async fn start_node(ctx: &Ctx, name: &str, identity: &WgIdentity, timings: PathT
             listen_port: free_udp_port(),
             keepalive_secs: 25,
             timings,
+            events: Arc::default(),
         },
         tun_tx,
         tun_rx,
