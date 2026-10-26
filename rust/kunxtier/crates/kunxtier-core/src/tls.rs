@@ -1,11 +1,12 @@
-//! Description: 面向核心中继的 TLS 指纹固定校验器 (NFR-6)。
+//! Description: 面向核心中继的 TLS 指纹固定校验器与客户端装配 (NFR-6)。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-26
 //!
 //! 自签部署形态下客户端不持 CA 信任库, 改以 `relay --init` 输出的证书
 //! sha256 指纹做固定校验: 指纹不匹配的连接一律拒绝。卫星进程与节点
-//! (信令 / 转发 WS) 共用本校验器。
+//! (信令 / 转发 WS / 一次性令牌注册) 共用本校验器; 同步 REST 形态
+//! (admin CLI / 节点注册) 另有 ureq agent 装配。
 
 use std::sync::Arc;
 
@@ -82,4 +83,15 @@ pub fn pinning_client_config(fingerprint: &str) -> Arc<rustls::ClientConfig> {
             }))
             .with_no_client_auth(),
     )
+}
+
+/// 指纹固定的 ureq agent (同步 REST 用: admin CLI 与节点一次性令牌注册)。
+/// 连接时限 10s: 黑洞地址的 OS 级重试可达分钟级, 注册调用方 (daemon
+/// 主循环 / CLI) 不能被无界拨号卡住。
+pub fn pinning_agent(fingerprint: &str) -> ureq::Agent {
+    let tls = pinning_client_config(fingerprint);
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .tls_config(tls)
+        .build()
 }

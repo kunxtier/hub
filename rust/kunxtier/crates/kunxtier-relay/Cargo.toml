@@ -13,7 +13,6 @@ tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 rcgen.workspace = true
 rusqlite.workspace = true
-ureq.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -24,3 +23,5 @@ futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 测试侧管理 API 调用 (指纹 agent 已移驻 kunxtier-core::tls)
+ureq.workspace = true

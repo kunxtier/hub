@@ -68,7 +68,7 @@ async fn start_core_with_stun(dir: &Path, stun: SocketAddr) -> Ctx {
         addr,
         base: format!("https://{addr}"),
         admin: out.admin_credential,
-        agent: kunxtier_relay::client_tls::pinning_agent(&out.fingerprint),
+        agent: kunxtier_core::tls::pinning_agent(&out.fingerprint),
         fp: out.fingerprint,
     }
 }

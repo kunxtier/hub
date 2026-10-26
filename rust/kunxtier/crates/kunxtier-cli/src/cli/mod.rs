@@ -5,12 +5,14 @@
 
 pub mod admin;
 pub mod error;
+mod node;
 mod relay;
 
 use clap::{Parser, Subcommand};
 
 pub use admin::AdminCommand;
 use error::Fail;
+pub use node::{DaemonArgs, DownArgs, StatusArgs, UpArgs};
 pub use relay::RelayCommand;
 
 #[derive(Parser)]
@@ -30,6 +32,14 @@ pub enum Command {
     Relay(RelayCommand),
     /// 管理操作; admin 凭证走 env KUNXTIER_ADMIN
     Admin(AdminCommand),
+    /// 前台运行节点守护进程 (up / down / status 的服务端)
+    Daemon(DaemonArgs),
+    /// 首次注册并连接 (令牌一次性); 需 daemon 在运行
+    Up(UpArgs),
+    /// 断开网络会话 (daemon 留守, 注册身份保留)
+    Down(DownArgs),
+    /// 本机与对端状态 (路径 direct / relay)
+    Status(StatusArgs),
 }
 
 impl Command {
@@ -37,6 +47,10 @@ impl Command {
         match self {
             Command::Relay(cmd) => cmd.execute(),
             Command::Admin(cmd) => cmd.execute(),
+            Command::Daemon(cmd) => cmd.execute(),
+            Command::Up(cmd) => cmd.execute(),
+            Command::Down(cmd) => cmd.execute(),
+            Command::Status(cmd) => cmd.execute(),
         }
     }
 }

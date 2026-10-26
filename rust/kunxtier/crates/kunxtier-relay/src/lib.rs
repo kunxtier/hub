@@ -8,9 +8,10 @@
 //! (节点凭证挑战应答 / 在线状态 / 节点表分发 / 打洞信令转发)、
 //! 转发双模式 (核心内置 /ws/relay + 卫星进程与注册分发)、限速与备份。
 //! 控制台托管在后续阶段接入。
+//! (自 2026-10-26 起 admin REST / 节点注册的 ureq 指纹客户端装配移驻
+//! kunxtier-core::tls, 节点注册客户端与 admin CLI 直接复用。)
 
 pub mod cert;
-pub mod client_tls;
 pub mod error;
 pub mod forward;
 pub mod init;

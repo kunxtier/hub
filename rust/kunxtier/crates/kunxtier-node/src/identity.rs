@@ -38,6 +38,11 @@ impl WgIdentity {
         &self.secret
     }
 
+    /// 私钥原字节 (state 目录持久化用; 不入日志不进配置)。
+    pub fn private_key_bytes(&self) -> [u8; 32] {
+        self.secret.to_bytes()
+    }
+
     pub fn public_key(&self) -> PublicKey {
         PublicKey::from(&self.secret)
     }

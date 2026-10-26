@@ -12,3 +12,5 @@ rand.workspace = true
 base64.workspace = true
 thiserror.workspace = true
 rustls.workspace = true
+# 指纹固定 REST 客户端装配 (tls::pinning_agent, admin CLI 与节点注册共用)
+ureq.workspace = true

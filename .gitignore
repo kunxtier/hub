@@ -30,6 +30,7 @@ logs/
 *.tsbuildinfo
 .data
 
-# kunxtier 运行态 (含 TLS 私钥与 SQLite)
+# kunxtier 运行态 (relay: TLS 私钥与 SQLite; node: 节点凭证与 WG 私钥)
 kunxtier-state/
+kunxtier-node-state/
 *.db

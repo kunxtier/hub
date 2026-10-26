@@ -1,0 +1,11 @@
+id: "FEAT-kunxtier-manual-verification-241411"
+type: "feature"
+slug: "kunxtier-manual-verification"
+title: "kunxtier 已交付功能人工验证"
+status: "open"
+priority: "medium"
+owner: "QA"
+tags:
+  - "kunxtier"
+created_at: "2026-10-26"
+updated_at: "2026-10-26"

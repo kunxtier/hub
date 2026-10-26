@@ -7,8 +7,8 @@
 - rust/kunxtier: 轻量 P2P 虚拟组网 (ZeroTier / EasyTier 平替)。cargo workspace:
   - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置 / TLS 指纹固定
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
-  - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时; 进度见 issue FEAT-kunxtier-core-runtime)
-  - kunxtier-cli: 单一入口二进制 `kunxtier`
+  - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时 + daemon 会话与本地 IPC / state 持久化; 进度见 issue FEAT-kunxtier-core-runtime)
+  - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / daemon / up / down / status)
   - web/kunxtier-console (控制台前端) 按阶段推进再落地
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
 
@@ -23,6 +23,10 @@ cargo run -p kunxtier-cli --bin kunxtier -- relay --init --listen 127.0.0.1:9443
 cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
 # 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发)
 KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地址> --fingerprint <核心指纹> --advertise <对外地址>
+# 节点 (daemon 常驻, up 需特权 TUN; state 目录默认 ./kunxtier-node-state)
+kunxtier daemon &   # 前台守护进程; 另一终端执行:
+kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹>
+kunxtier status && kunxtier down
 
 # 任务编排 (cargo-make, rust/kunxtier/Makefile.toml, 按领域划分)
 cargo make --list-all-steps   # 查看全部任务
@@ -31,7 +35,7 @@ cargo make                    # 缺省: 格式校验 + clippy + 测试
 
 仓库根 `make hooks` 一次装载 git hooks (pre-commit: 敏感文件与格式检查; commit-msg: conventional 前缀与 emoji 红线), 卸载 `make hooks-uninstall`。
 
-- 运行态目录 `kunxtier-state/` 含 TLS 私钥与 SQLite, 已进 .gitignore, 严禁提交或外传
+- 运行态目录 `kunxtier-state/` (TLS 私钥与 SQLite) 与 `kunxtier-node-state/` (节点凭证与 WG 私钥) 已进 .gitignore, 严禁提交或外传
 - admin 凭证只走 env `KUNXTIER_ADMIN`, 证书指纹走 `KUNXTIER_FINGERPRINT` 或 `--fingerprint`
 
 ## 流程

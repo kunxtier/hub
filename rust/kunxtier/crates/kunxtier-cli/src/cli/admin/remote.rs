@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use kunxtier_relay::client_tls::pinning_agent;
+use kunxtier_core::tls::pinning_agent;
 
 use crate::cli::error::Fail;
 

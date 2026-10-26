@@ -17,6 +17,8 @@ rustls.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# 一次性令牌注册客户端 (register, 指纹固定 agent 复用 kunxtier-core::tls)
+ureq.workspace = true
 sha2.workspace = true
 rand.workspace = true
 base64.workspace = true

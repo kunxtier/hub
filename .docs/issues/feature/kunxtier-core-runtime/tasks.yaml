@@ -33,7 +33,7 @@ tasks:
     owner: "NODE"
   - id: "T09"
     title: "kunxtier-cli 子命令与本地 IPC: relay/console/daemon/up/down/status/admin"
-    status: "todo"
+    status: "done"
     owner: "CLI"
   - id: "T10"
     title: "按 e2e-kunxtier-network 场景矩阵执行端到端验证并记录结果"

@@ -3,7 +3,7 @@
 //! Author: qinzhenya
 //! Created: 2026-10-20
 //!
-//! TLS 由自签证书承担, 客户端以指纹固定校验 (见 client_tls)。
+//! TLS 由自签证书承担, 客户端以指纹固定校验 (见 kunxtier-core::tls)。
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};

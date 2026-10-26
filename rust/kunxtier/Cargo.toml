@@ -14,7 +14,8 @@ edition = "2021"
 [workspace.dependencies]
 kunxtier-core = { path = "crates/kunxtier-core" }
 kunxtier-relay = { path = "crates/kunxtier-relay" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+kunxtier-node = { path = "crates/kunxtier-node" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 futures-util = "0.3"

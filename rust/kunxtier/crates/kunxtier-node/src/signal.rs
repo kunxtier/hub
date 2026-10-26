@@ -26,6 +26,10 @@ use crate::error::{Error, Result};
 
 /// 未认证连接的完成时限 (与服务端一致)。
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// 核心拨号时限: 拨号发生在 daemon 主循环内, 必须有界——黑洞地址 (不回
+/// RST) 的 OS 级重试可达分钟级, 无界会把 daemon 的 IPC 一并卡死
+/// (同 runtime::RELAY_CONNECT_TIMEOUT 的裁决)。
+const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
 /// 命令通道容量 (心跳 / 候选上报均为低频)。
 const CMD_CAPACITY: usize = 32;
 
@@ -111,8 +115,9 @@ async fn dial(options: &SignalOptions) -> Result<TlsWs> {
     let connector = tokio_rustls::TlsConnector::from(kunxtier_core::tls::pinning_client_config(
         &options.fingerprint,
     ));
-    let tcp = TcpStream::connect(&options.core)
+    let tcp = tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(&options.core))
         .await
+        .map_err(|_| Error::Transport("核心中继 tcp 连接超时".into()))?
         .map_err(|e| Error::Transport(format!("核心中继 tcp 连接失败: {e}")))?;
     tcp.set_nodelay(true).ok();
     let host = options

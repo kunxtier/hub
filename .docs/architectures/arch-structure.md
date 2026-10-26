@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-26, ik-advance T08)
+## 当前实际结构 (2026-10-26, ik-advance T09)
 
 ```text
 hub/
@@ -49,13 +49,16 @@ hub/
 │   ├── Makefile.toml             # cargo-make 任务集 (构建 / 质量 / 测试 / 运行 / 发布)
 │   └── crates/
 │       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig, stun_servers)
-│       │                         #   + tls (指纹固定 PinVerifier, 卫星与节点客户端共用)
-│       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit + client_tls (ureq 装配)
+│       │                         #   + tls (指纹固定 PinVerifier 与 ureq pinning_agent, 卫星 / 节点 / admin CLI 共用)
+│       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit
 │       │                         #   + signaling (信令 WS, 候选广播 / 策略推送) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
 │       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
+│       │                         #   + 节点子命令 daemon / up / down / status (IPC 客户端)
 │       └── kunxtier-node/        # 节点数据面: engine + tun + identity + netconf (网段冲突检测)
 │                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (PING/PONG 探测与路径状态机)
 │                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配, PathTimings 节奏)
+│                                 #   + state (node.json 版本化持久化) + register (一次性令牌注册客户端)
+│                                 #   + ipc (UDS + JSON 行协议) + daemon (会话生命周期与 IPC 服务端)
 ├── CLAUDE.md                     # 已创建
 └── web/                          # 未建 (控制台前端阶段落地)
 ```
@@ -87,5 +90,14 @@ hub/
 - 2026-10-26 (T08 冲突检测边界): netconf 只比对接口地址 (含掩码网络, 双向区间相交); 系统路由表全量解析跨平台脆弱、误拒比漏报代价高, 列为 e2e 反馈项。枚举失败按无冲突放行 (防断网保护不阻断组网)。
 - 2026-10-26 (T08 实施期修复): 其一, ForceRelay 下对端探测帧会把引擎端点拉回真实地址破坏 FR-10——现完全忽略探测 (不学端点不应答); 其二, 中继通道原仅 5s 对齐节拍建连 (首个节拍早于 State 到达时列表为空), 现列表首达即建, 失活判定与短打洞窗口不再落空。
 - 2026-10-26 (T08 依赖): 新增 if-addrs 0.15 (节点接口枚举, 三平台 getifaddrs / GetAdaptersAddresses 封装, 供 netconf)。
+- 2026-10-26 (T09 结构迁移): pinning_agent (ureq 指纹 agent) 自 relay::client_tls 移驻 kunxtier-core::tls——节点注册客户端需同源装配, 而 node 不得反向依赖 relay (依赖方向 cli → relay / node → core); relay 的 ureq 随之降为 dev-dep。
+- 2026-10-26 (T09 IPC 裁决): 本地 IPC = state 目录内 UDS + JSON 行, 单连接单请求, 目录 0700 即信任边界 (本机当前用户); 残留 socket 以探活区分活 daemon 与死文件。Windows named pipe 归 T13, 不预写无法编译验证的 cfg(windows) 代码, 非 unix 平台 bind/connect 返回 Unsupported 占位。
+- 2026-10-26 (T09 up 语义裁决): daemon 常驻, up 经 IPC 由 daemon 完成注册 (WG 身份不离开 daemon 进程); 令牌为空 = 以既有 state 直接重连 (排障恢复入口); 同名重注册 (FR-17) 沿用身份与端口换发凭证, name / core / 指纹与 state 不一致即拒绝; daemon 启动有 state 即自动上线 (FR-9 前提), 意外退出指数退避重连 (起步可配 30s 封顶, 存活满 60s 复位), 网段冲突等致命态封停。
+- 2026-10-26 (T09 state 形态): node.json (0600) 集中承载全部节点敏感量 (凭证 / WG 私钥 / vip / core / 指纹 / 监听端口), 原子写 + 版本字段拒读高版本; WG 监听端口缺省自动选闲并持久化 (打洞候选稳定性)。节点配置文件本切片不引入 (state 已承载 core/指纹), T14 服务化按需再评估。
+- 2026-10-26 (T09 运行时接口): runtime 增 done 退出通知 (NodeHandle::done watch), daemon 会话监督以此为观测源; IP 层以 TunFactory 特质注入 (生产 TunAdapter / 测试 gotatun 通道), 通道实现的 UDP 半边由 Keep 句柄随会话持有防提前关闭。
+- 2026-10-26 (T09 实施期修复): serve 退出必须连带拆除 IPC accept 任务与 socket 文件——残留 listener 既挡新 daemon 的探活判定, 又吞掉 IPC 应答 (连接被接受但无主应答)。
+- 2026-10-26 (T09 测试形态): axum-server Handle 管不到已升级的 WS 连接 (升级后流归 axum 内部任务持有), 核心崩溃模拟以独立子 runtime + shutdown_background 丢弃任务组实现; 核心原端口复活复用既有证书与库 (init 拒绝重复初始化)。
+- 2026-10-26 (T09 依赖): tokio 补 signal feature (daemon ctrl-c); workspace 增 kunxtier-node path 依赖 (cli 装配节点子命令)。
+- 已知妥协 (T09): status --verbose 排障视图归 T15; Windows IPC 为 Unsupported 占位归 T13。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

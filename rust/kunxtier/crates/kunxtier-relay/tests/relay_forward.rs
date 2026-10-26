@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use kunxtier_core::config::{RelayConfig, SatelliteConfig};
 use kunxtier_core::protocol::{decode_forward_frame, encode_forward_frame, SignalRelay};
-use kunxtier_relay::client_tls::{pinning_agent, PinVerifier};
+use kunxtier_core::tls::{pinning_agent, PinVerifier};
 use kunxtier_relay::satellite;
 use kunxtier_relay::server::{build_router, AppState};
 use kunxtier_relay::store::Store;

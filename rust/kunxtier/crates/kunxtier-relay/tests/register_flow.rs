@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::SignalRelay;
-use kunxtier_relay::client_tls::pinning_agent;
+use kunxtier_core::tls::pinning_agent;
 use kunxtier_relay::server::{build_router, AppState};
 use kunxtier_relay::store::Store;
 

@@ -107,10 +107,12 @@ pub struct NodeStatus {
     pub fatal: Option<String>,
 }
 
-/// 运行时句柄: 状态观测与停机。
+/// 运行时句柄: 状态观测与停机。Clone 后各持有方共享同一运行时。
+#[derive(Clone)]
 pub struct NodeHandle {
     status: Arc<Mutex<NodeStatus>>,
     cancel: watch::Sender<bool>,
+    done: watch::Sender<Option<String>>,
 }
 
 impl NodeHandle {
@@ -121,6 +123,11 @@ impl NodeHandle {
     /// 停机: 事件循环退出, 引擎与中继会话收尾。
     pub fn stop(&self) {
         let _ = self.cancel.send(true);
+    }
+
+    /// 退出通知: 运行时结束时置为退出原因 (daemon 会话监督的观测源)。
+    pub fn done(&self) -> watch::Receiver<Option<String>> {
+        self.done.subscribe()
     }
 }
 
@@ -187,9 +194,11 @@ where
 
     let status = Arc::new(Mutex::new(NodeStatus::default()));
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (done_tx, _done_rx) = watch::channel(None);
     let handle = NodeHandle {
         status: status.clone(),
         cancel: cancel_tx,
+        done: done_tx.clone(),
     };
     let runtime = Runtime {
         options,
@@ -201,6 +210,7 @@ where
         relays: Vec::new(),
         tunnels: HashMap::new(),
         status,
+        done: done_tx,
     };
     tokio::spawn(runtime.run(probe, stun, activity, cancel_rx));
     Ok(handle)
@@ -224,6 +234,8 @@ where
     relays: Vec<SignalRelay>,
     tunnels: HashMap<u8, RelayTunnel>,
     status: Arc<Mutex<NodeStatus>>,
+    /// 退出原因通知 (handle.done 的发送端)。
+    done: watch::Sender<Option<String>>,
 }
 
 impl<Tx, Rx> Runtime<Tx, Rx>
@@ -292,6 +304,8 @@ where
                 }
             }
         };
+        // 先广播退出 (daemon 侧 down / 监督流程即可推进), 再做引擎收尾
+        let _ = self.done.send(Some(reason.clone()));
         self.shutdown(reason).await;
     }
 

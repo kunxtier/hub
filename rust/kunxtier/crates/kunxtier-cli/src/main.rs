@@ -3,8 +3,8 @@
 //! Author: qinzhenya
 //! Created: 2026-10-20
 //!
-//! 当前切片: relay (init / run / backup / 卫星模式) 与 admin 管理;
-//! daemon / up / down / status 在数据面阶段接入。
+//! 当前切片: relay (init / run / backup / 卫星模式)、admin 管理与
+//! 节点侧 daemon / up / down / status; console 与 install 随后续切片接入。
 
 mod cli;
 
