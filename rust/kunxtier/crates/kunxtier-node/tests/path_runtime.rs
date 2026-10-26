@@ -1,4 +1,4 @@
-//! Description: 节点运行时端到端验证: STUN 探测、并发打洞直连、强制中继与超时回落。
+//! Description: 节点运行时端到端验证: STUN 探测、打洞直连、强制中继、超时回落与路径切换恢复。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-26
@@ -6,7 +6,8 @@
 //! 核心中继以进程内真实 TLS 服务形态起停; STUN 用本地伪服务器 (回
 //! XOR-MAPPED-ADDRESS), 走节点真实 stun 代码路径; IP 层用 gotatun 通道免特权。
 //! 覆盖 FR-2 (候选交换 + 打洞直连)、FR-3 (超时回落且中继路径互通)、FR-10
-//! (强制中继 / 恢复自动) 与 FR-4 (中继只见密文帧) 的 T07 切片。
+//! (强制中继 / 恢复自动)、FR-4 (中继只见密文帧) 与 FR-6 (直连失活回落中继 /
+//! 周期重试切回直连, 重试期间流量不断)。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -23,7 +24,7 @@ use tokio::net::UdpSocket;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::SignalRelay;
 use kunxtier_node::identity::WgIdentity;
-use kunxtier_node::runtime::{start, NodeHandle, NodeOptions, NodeStatus};
+use kunxtier_node::runtime::{start, NodeHandle, NodeOptions, NodeStatus, PathTimings};
 use kunxtier_node::stun::MAGIC_COOKIE;
 use kunxtier_node::DEFAULT_MTU;
 
@@ -202,8 +203,8 @@ struct Node {
     observe: <gotatun::udp::channel::UdpChannelFactory as UdpTransportFactory>::RecvV4,
 }
 
-/// 以通道 IP 层启动一个节点运行时。
-async fn start_node(ctx: &Ctx, name: &str, identity: &WgIdentity) -> Node {
+/// 以通道 IP 层启动一个节点运行时 (路径节奏可配, 缺省生产值)。
+async fn start_node(ctx: &Ctx, name: &str, identity: &WgIdentity, timings: PathTimings) -> Node {
     let (credential, ip) = register_node(ctx, name, identity);
     let (tun_tx, tun_rx, mut factory) = new_udp_tun_channel(
         64,
@@ -222,6 +223,7 @@ async fn start_node(ctx: &Ctx, name: &str, identity: &WgIdentity) -> Node {
             identity: identity.clone(),
             listen_port: free_udp_port(),
             keepalive_secs: 25,
+            timings,
         },
         tun_tx,
         tun_rx,
@@ -284,8 +286,8 @@ async fn punch_direct_force_relay_and_recover() {
 
     let identity_a = WgIdentity::generate();
     let identity_b = WgIdentity::generate();
-    let mut node_a = start_node(&ctx, "na", &identity_a).await;
-    let mut node_b = start_node(&ctx, "nb", &identity_b).await;
+    let mut node_a = start_node(&ctx, "na", &identity_a, PathTimings::default()).await;
+    let mut node_b = start_node(&ctx, "nb", &identity_b, PathTimings::default()).await;
 
     // ---- FR-2: STUN 候选交换 + 并发打洞 → 直连 ----
     // 打洞期 keepalive 收紧驱动握手, "观测到 WG 流量" 即确认 direct
@@ -334,11 +336,17 @@ async fn unreachable_candidates_fall_back_to_relay() {
     // 说谎 STUN: 候选指向黑洞, 双侧打洞必然失败 (模拟对称 NAT 等打不通拓扑)
     let stun = spawn_fake_stun(false).await;
     let ctx = start_core_with_stun(dir.path(), stun).await;
+    // 收紧节奏驱动重试振荡: 窗口 1.5s, 回落 600ms 后即重试
+    let timings = PathTimings {
+        punch_window: Duration::from_millis(1500),
+        retry: Duration::from_millis(600),
+        ..PathTimings::default()
+    };
 
     let identity_a = WgIdentity::generate();
     let identity_b = WgIdentity::generate();
-    let mut node_a = start_node(&ctx, "na", &identity_a).await;
-    let mut node_b = start_node(&ctx, "nb", &identity_b).await;
+    let mut node_a = start_node(&ctx, "na", &identity_a, timings.clone()).await;
+    let mut node_b = start_node(&ctx, "nb", &identity_b, timings).await;
 
     // ---- FR-3: 打洞窗口到期 → 回落核心内置中继 ----
     let status = wait_path(&node_a, "relayed", Duration::from_secs(20)).await;
@@ -352,6 +360,64 @@ async fn unreachable_candidates_fall_back_to_relay() {
     // 中继路径互通: 上行帧 [目的][源][密文] 经核心内置转发投递
     exchange(&node_a, &mut node_b, b"fallback-relay-a-to-b").await;
     exchange(&node_b, &mut node_a, b"fallback-relay-b-to-a").await;
+
+    // ---- FR-6: 回落后周期重试直连; 重试打洞期间以中继为 fallback, 流量不断 ----
+    wait_path(&node_a, "punching", Duration::from_secs(10)).await;
+    exchange(&node_a, &mut node_b, b"retry-punching-a-to-b").await;
+    // 重试窗口到期仍未通 → 回到中继, 流量继续
+    wait_path(&node_a, "relayed", Duration::from_secs(10)).await;
+    exchange(&node_a, &mut node_b, b"retry-expired-a-to-b").await;
+
+    node_a.handle.stop();
+    node_b.handle.stop();
+}
+
+/// FR-6 全链: 直连静默失活 → 回落中继 (业务不断) → 周期重试 → 切回直连。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_silence_falls_back_and_retry_recovers() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "off".into()),
+        )
+        .try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let stun = spawn_fake_stun(true).await;
+    let ctx = start_core_with_stun(dir.path(), stun).await;
+    // 关闭周期保活 Ping (1h), 失活阈值 800ms, 回落停留 5s 后重试——
+    // 双侧无探测无业务即直连失活, 模拟路径中断 (FR-6 的 "直连中断")
+    let timings = PathTimings {
+        ping: Duration::from_secs(3600),
+        dead_after: Duration::from_millis(800),
+        retry: Duration::from_secs(5),
+        ..PathTimings::default()
+    };
+
+    let identity_a = WgIdentity::generate();
+    let identity_b = WgIdentity::generate();
+    let mut node_a = start_node(&ctx, "na", &identity_a, timings.clone()).await;
+    let mut node_b = start_node(&ctx, "nb", &identity_b, timings).await;
+
+    // ---- FR-2: 双侧直连 ----
+    wait_path(&node_a, "direct", Duration::from_secs(15)).await;
+    wait_path(&node_b, "direct", Duration::from_secs(15)).await;
+    exchange(&node_a, &mut node_b, b"silence-a-to-b").await;
+    exchange(&node_b, &mut node_a, b"silence-b-to-a").await;
+
+    // ---- FR-6: 静默失活 → 回落中继, 端点为伪端点 ----
+    let status = wait_path(&node_a, "relayed", Duration::from_secs(10)).await;
+    let pseudo = status.peers[0].endpoint.expect("回落应有伪端点");
+    assert!(
+        pseudo.ip().to_string().starts_with("240."),
+        "回落端点应为伪端点: {pseudo}"
+    );
+    // 回落期间业务走中继不断
+    exchange(&node_a, &mut node_b, b"dead-fallback-a-to-b").await;
+
+    // ---- FR-6: 周期重试打洞 → 切回直连 ----
+    wait_path(&node_a, "direct", Duration::from_secs(20)).await;
+    exchange(&node_a, &mut node_b, b"recovered-a-to-b").await;
+    wait_path(&node_b, "direct", Duration::from_secs(20)).await;
+    exchange(&node_b, &mut node_a, b"recovered-b-to-a").await;
 
     node_a.handle.stop();
     node_b.handle.stop();

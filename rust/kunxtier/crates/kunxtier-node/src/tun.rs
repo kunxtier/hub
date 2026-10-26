@@ -4,8 +4,9 @@
 //! Created: 2026-10-21
 //!
 //! 适配方式镜像 gotatun 官方 tun 适配器 (src/tun/tun_async_device.rs), 但设备由
-//! tun-rs 创建与持有: 地址 / MTU 在创建时落定, kunxtier 自持设备便于后续路由与
-//! 冲突检测 (T08) 直接操作。MTU 观察器当前为常量, 动态策略随 T08 落地。
+//! tun-rs 创建与持有: 地址 / MTU 在创建时落定, kunxtier 自持设备便于路由与
+//! 冲突检测 (netconf 模块) 直接操作。MTU 取按最坏路径推导的静态值 (单一 TUN
+//! 同时服务直连与中继两档路径, 无按路径动态调整的空间, 见 DEFAULT_MTU 推导)。
 
 use std::io;
 use std::iter;
@@ -17,9 +18,17 @@ use gotatun::tun::{IpRecv, IpSend, MtuWatcher};
 
 use crate::error::Result;
 
-/// TUN MTU 保守默认值: 覆盖中继最坏路径 (WG + TLS + TCP 叠加封装)。
-/// FR-16 要求的按最坏路径精推与大包验证随 T08 落地, 此前以安全值运行。
-pub const DEFAULT_MTU: u16 = 1280;
+/// TUN MTU 默认值: 按最坏路径推导 (FR-16)。
+/// 两条路径的约束不对称:
+/// - 直连 (WG over UDP) 为硬约束: 外层典型 1500 - 60 (外层 IP + UDP + WG 封装)
+///   = 1440, 取 1440 保证 WG 外层报文不分片;
+/// - 中继 (WG over TLS over TCP) 叠加 TLS 记录头 (5B) + 转发帧头 (8B) +
+///   TCP/IP (40B), 但 TCP 是流式传输, 由分段自然吸收, 无内层 MTU 硬上限;
+///
+/// 故默认取直连上限 1440, 同时覆盖 e2e 必过的 1400 字节级 ICMP 用例
+/// (ICMP 载荷 1400 + 28 头 = 1428 ≤ 1440)。超过 MTU 的内层 UDP 由内核
+/// 按 IP 分片拆开后进 TUN, 每片独立加密转发 (行为显式定义)。
+pub const DEFAULT_MTU: u16 = 1440;
 
 /// TUN 设备创建配置。
 #[derive(Debug, Clone)]

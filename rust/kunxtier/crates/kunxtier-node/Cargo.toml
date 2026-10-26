@@ -8,6 +8,8 @@ kunxtier-core.workspace = true
 gotatun.workspace = true
 tun-rs.workspace = true
 ipnetwork.workspace = true
+# 本地接口枚举 (netconf 网段冲突检测): 三平台 getifaddrs / GetAdaptersAddresses 封装
+if-addrs.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-rustls.workspace = true

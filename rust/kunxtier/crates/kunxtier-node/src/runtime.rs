@@ -4,15 +4,16 @@
 //! Created: 2026-10-26
 //!
 //! 职责分层: 本模块只做事件收集与状态推进 (State / Event / Action), 协议细节
-//! 分属 transport / stun / punch / relay_conn / signal 各模块。路径策略两档
-//! (FR-10): Auto = 候选到达即并发打洞, 窗口内无 WG 流量则回落中继;
+//! 分属 transport / stun / punch / relay_conn / signal / netconf 各模块。
+//! 路径策略两档 (FR-10): Auto = 候选到达即并发打洞, 失败回落中继并周期重试;
 //! ForceRelay = 跳过打洞直接伪端点。直连与中继的切换以引擎端点漂移为底,
-//! 周期性重试直连与保活精化随 T08 落地。
+//! T08 补齐活性观测 (Direct 周期 Ping / 失活判定)、周期重试直连与
+//! 重试期间的 fallback 保活 (Punching 携带既有路径, 流量不断)。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gotatun::tun::{IpRecv, IpSend};
 use gotatun::x25519::PublicKey;
@@ -23,7 +24,8 @@ use kunxtier_core::protocol::{PathPolicy, SignalPeer, SignalRelay};
 use crate::engine::{build_engine_split, EngineOptions, PeerSpec, WgEngine};
 use crate::error::{Error, Result};
 use crate::identity::WgIdentity;
-use crate::punch::{decode_probe, encode_probe, PunchState, PunchToken};
+use crate::netconf;
+use crate::punch::{decode_probe, encode_probe, ProbeKind, PunchState, PunchToken};
 use crate::relay_conn::{RelayIdentity, RelayTunnel};
 use crate::signal::{NodeEvent, SignalClient, SignalCmd, SignalOptions};
 use crate::stun;
@@ -31,8 +33,6 @@ use crate::transport::{PathHub, PathStreams, PathUdpFactory, StunEvent};
 
 /// 打洞探测突发间隔。
 const PROBE_INTERVAL: Duration = Duration::from_millis(250);
-/// 打洞窗口: 超时回落中继 (FR-3)。
-const PUNCH_WINDOW: Duration = Duration::from_secs(5);
 /// 打洞期的 keepalive 收紧值: 端点学到后驱动 WG 握手尽快落地,
 /// 使 "观测到 WG 流量" 的直连确认落在打洞窗口内 (常态值见 NodeOptions)。
 const PUNCH_KEEPALIVE_SECS: u16 = 1;
@@ -43,6 +43,30 @@ const MAX_RELAYS: usize = 254;
 /// 中继建连时限: 拨号发生在主事件循环内, 必须有界,
 /// 黑洞地址 (不回 RST) 才不会拖垮打洞节拍与信令事件。
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// 路径管理节奏 (T08)。生产默认值面向个人规模; 集成测试以小值驱动状态机。
+#[derive(Debug, Clone)]
+pub struct PathTimings {
+    /// Direct 态保活 Ping 周期: 应用层活性观测, 是失活判定的证据来源。
+    pub ping: Duration,
+    /// 直连失活阈值: 超过该时长无对端探测 / WG 流量证据即判死, 回落中继。
+    pub dead_after: Duration,
+    /// Relayed 态直连重试间隔 (自动策略)。
+    pub retry: Duration,
+    /// 打洞窗口: 到期未通即回落 (FR-3)。
+    pub punch_window: Duration,
+}
+
+impl Default for PathTimings {
+    fn default() -> Self {
+        PathTimings {
+            ping: Duration::from_secs(15),
+            dead_after: Duration::from_secs(60),
+            retry: Duration::from_secs(30),
+            punch_window: Duration::from_secs(5),
+        }
+    }
+}
 
 /// 运行时装配参数。
 pub struct NodeOptions {
@@ -59,6 +83,8 @@ pub struct NodeOptions {
     pub listen_port: u16,
     /// 直连 persistent keepalive 秒数 (FR-15, 25s 量级)。
     pub keepalive_secs: u16,
+    /// 路径管理节奏 (保活 / 失活 / 重试 / 打洞窗口)。
+    pub timings: PathTimings,
 }
 
 /// 单 peer 路径状态快照 (status 输出)。
@@ -77,6 +103,8 @@ pub struct NodeStatus {
     pub own_ip: Option<Ipv4Addr>,
     pub policy: Option<PathPolicy>,
     pub peers: Vec<PeerStatus>,
+    /// 致命退出原因 (网段冲突拒绝启动等; 运行时已退出)。
+    pub fatal: Option<String>,
 }
 
 /// 运行时句柄: 状态观测与停机。
@@ -103,8 +131,21 @@ struct PeerEntry {
     online: bool,
     candidates: Vec<SocketAddr>,
     state: PunchState,
-    /// 最近一次收到的该节点探测令牌 (回执防回声环)。
-    last_probe_token: Option<PunchToken>,
+}
+
+/// 单个路径节拍收集的动作 (扫描产出, 执行侧消费)。
+#[derive(Default)]
+struct TickActions {
+    /// 打洞突发: (候选集, 节点名, 窗口令牌)。
+    bursts: Vec<(Vec<SocketAddr>, String, PunchToken)>,
+    /// Direct 保活 Ping: (端点, 节点名)。
+    pings: Vec<(SocketAddr, String)>,
+    /// 打洞窗口到期: (节点名, fallback 端点)。
+    expired: Vec<(String, Option<SocketAddr>)>,
+    /// 直连失活: 节点名。
+    dead: Vec<String>,
+    /// 周期重试直连: (节点名, fallback 端点)。
+    retries: Vec<(String, Option<SocketAddr>)>,
 }
 
 /// 启动节点运行时: 建引擎 + 连信令 + 进事件循环 (返回句柄, 循环在后台任务)。
@@ -221,7 +262,7 @@ where
                             break format!("信令通道关闭: {reason}");
                         }
                         Some(event) => {
-                            if let Some(stop) = self.on_signal_event(event, &stun_cmd_tx).await {
+                            if let Some(stop) = self.on_signal_event(event, &stun_cmd_tx, &relay_down_tx).await {
                                 break stop;
                             }
                         }
@@ -260,12 +301,26 @@ where
         &mut self,
         event: NodeEvent,
         stun_cmd: &mpsc::Sender<Vec<String>>,
+        relay_down: &mpsc::Sender<u8>,
     ) -> Option<String> {
         match event {
             NodeEvent::Ready { ip, .. } => {
                 if let Ok(vip) = ip.parse::<Ipv4Addr>() {
                     self.hub.set_own_vip(vip);
                     self.status.lock().expect("NodeStatus 锁中毒").own_ip = Some(vip);
+                    // FR-14: 本地网段 (CGNAT) 冲突即拒绝运行 (vip 此刻才权威已知)
+                    let conflicts = netconf::detect_conflicts(vip);
+                    if !conflicts.is_empty() {
+                        let report = conflicts
+                            .iter()
+                            .map(|c| c.describe(vip))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let reason = format!("本地网段与虚拟网段冲突: {report}");
+                        tracing::error!(%reason, "拒绝启动 (FR-14)");
+                        self.status.lock().expect("NodeStatus 锁中毒").fatal = Some(reason.clone());
+                        return Some(reason);
+                    }
                 }
             }
             NodeEvent::State {
@@ -275,6 +330,10 @@ where
                 stuns,
             } => {
                 self.relays = relays;
+                // 列表首达即建通道, 不等对齐节拍 (回落 / 失活判定可能早于首个节拍)
+                if let Err(e) = self.ensure_relays(relay_down).await {
+                    tracing::warn!(error = %e, "中继通道对齐未完成");
+                }
                 self.apply_policy(policy).await;
                 self.merge_nodes(nodes).await;
                 if !stuns.is_empty() {
@@ -296,6 +355,9 @@ where
             }
             NodeEvent::Relays(relays) => {
                 self.relays = relays;
+                if let Err(e) = self.ensure_relays(relay_down).await {
+                    tracing::warn!(error = %e, "中继通道对齐未完成");
+                }
             }
             NodeEvent::Policy(policy) => {
                 self.apply_policy(policy).await;
@@ -329,7 +391,6 @@ where
                 online: false,
                 candidates: Vec::new(),
                 state: PunchState::Idle,
-                last_probe_token: None,
             });
             entry.public_key = public_key;
             entry.vip = vip;
@@ -338,34 +399,33 @@ where
             entry.candidates = candidates;
             entry.online = node.online;
             if came_online || got_candidates {
-                // 上线或候选到达 (Announce 广播刷新) 即具备打洞条件
-                self.start_punch(&node.name);
+                // 上线或候选到达 (Announce 广播刷新) 即具备打洞条件;
+                // 既有路径 (如回落后的重打洞) 作为 fallback 保持流量不断
+                let fallback = entry.state.endpoint();
+                self.begin_punch(&node.name, fallback);
             }
         }
         self.peers.retain(|name, _| names.contains(name));
         self.sync_peers().await;
     }
 
-    /// 就地对单个节点评估打洞启动 (策略 Auto、有候选且当前无工作路径时)。
-    fn start_punch(&mut self, name: &str) {
-        let policy = self.policy();
-        let Some(entry) = self.peers.get_mut(name) else {
-            return;
-        };
-        if policy != PathPolicy::Auto || entry.state.is_punching() || entry.candidates.is_empty() {
+    /// 就地开一轮打洞窗口: 策略 Auto、非 punching、非 direct 且有候选时。
+    /// fallback 为窗口期内保持的既有端点 (重试直连不中断在用流量)。
+    fn begin_punch(&mut self, name: &str, fallback: Option<SocketAddr>) {
+        if self.policy() != PathPolicy::Auto {
             return;
         }
-        if matches!(
-            entry.state,
-            PunchState::Direct { .. } | PunchState::Relayed { .. }
-        ) {
-            // 已有工作路径: T07 不主动重试直连 (周期重试随 T08)
-            return;
+        let window = self.options.timings.punch_window;
+        if let Some(entry) = self.peers.get_mut(name) {
+            if entry.state.is_punching() || entry.state.is_direct() || entry.candidates.is_empty() {
+                return;
+            }
+            entry.state = PunchState::Punching {
+                deadline: Instant::now() + window,
+                token: PunchToken::random(),
+                fallback,
+            };
         }
-        entry.state = PunchState::Punching {
-            deadline: std::time::Instant::now() + PUNCH_WINDOW,
-            token: PunchToken::random(),
-        };
     }
 
     fn policy(&self) -> PathPolicy {
@@ -394,17 +454,13 @@ where
             PathPolicy::Auto => {
                 tracing::info!("路径策略切换为自动 (直连优先)");
                 for name in names {
-                    // 强制中继恢复自动: 清端点回 Idle, 由重打洞裁决路径 (FR-10 恢复语义)
-                    let public_key = self.peers.get(&name).map(|entry| entry.public_key);
-                    if let Some(public_key) = public_key {
-                        if let Some(entry) = self.peers.get_mut(&name) {
-                            if matches!(entry.state, PunchState::Relayed { .. }) {
-                                entry.state = PunchState::Idle;
-                                let _ = self.engine.set_endpoint(&public_key, None).await;
-                            }
-                        }
-                    }
-                    self.start_punch(&name);
+                    // 强制中继恢复自动: 以既有中继路径为 fallback 立即重打洞,
+                    // 由打洞裁决是否回直连 (FR-10 恢复语义); direct 节点不受影响
+                    let fallback = self
+                        .peers
+                        .get(&name)
+                        .and_then(|entry| entry.state.endpoint());
+                    self.begin_punch(&name, fallback);
                 }
             }
         }
@@ -414,6 +470,7 @@ where
     /// 强制中继执行: 未处于中继态的节点逐个指到在线中继伪端点。
     /// 策略到达与中继通道就绪存在时序竞争, 通道变化后需重施。
     async fn enforce_force_relay(&mut self, names: &[String]) {
+        let next_retry = Instant::now() + self.options.timings.retry;
         for name in names {
             let already = self
                 .peers
@@ -432,7 +489,10 @@ where
             };
             if let Some(pseudo) = self.pick_relay(vip) {
                 if let Some(entry) = self.peers.get_mut(name) {
-                    entry.state = PunchState::Relayed { endpoint: pseudo };
+                    entry.state = PunchState::Relayed {
+                        endpoint: pseudo,
+                        next_retry,
+                    };
                 }
                 let _ = self.engine.set_endpoint(&public_key, Some(pseudo)).await;
             }
@@ -442,46 +502,68 @@ where
 
     // ------------------------------ 打洞事件 ------------------------------
 
-    /// 收到探测帧: 回填来源端点; 回执条件为 "打洞中或新令牌" (防回声环,
-    /// 同时保证对端打洞时已直连的本端仍会应答一次, 支撑策略恢复后的重打洞)。
-    /// 探测的观测源本身即双向通路证明 (对端 NAT 映射对本地址可用),
-    /// 故打洞期收到探测即判 direct; WG 流量事件退化为端点漂移监测——
-    /// WG 握手是按需的, 首个业务包才触发, 不作为打洞成功的必要条件。
+    /// 收到探测帧 (Ping 主动探测 / Pong 回执)。
+    /// 观测源本身即通路证明 (对端 NAT 映射对本地址可用), 打洞期收到任一类
+    /// 即判 direct; Direct 态收到即刷新活性并跟随端点漂移 (FR-6)。
+    /// Ping 一律回 Pong (回显令牌; Pong 不再触发应答, 无回声环), 使对端
+    /// 打洞 / 重试总能拿到回执; 强制中继策略下完全忽略——不学直连端点也
+    /// 不应答, 否则对端探测会把引擎端点拉回真实地址, 破坏 FR-10。
     async fn on_probe(&mut self, from: SocketAddr, frame: &[u8]) {
-        let Some((name, token)) = decode_probe(frame) else {
+        let Some((kind, name, token)) = decode_probe(frame) else {
             return;
         };
+        if self.policy() == PathPolicy::ForceRelay {
+            return;
+        }
         let Some(entry) = self.peers.get_mut(&name) else {
             return;
         };
         let public_key = entry.public_key;
-        let is_new_token = entry.last_probe_token != Some(token);
-        entry.last_probe_token = Some(token);
+        let now = Instant::now();
+        let next_ping = now + self.options.timings.ping;
         let punching = entry.state.is_punching();
-        let reply = (punching || is_new_token).then(|| {
-            let token = match &entry.state {
-                PunchState::Punching { token, .. } => *token,
-                _ => PunchToken::random(),
-            };
-            encode_probe(&self.options.name, &token)
-        });
-        self.reverse.insert(from, name.clone());
-        let _ = self.engine.set_endpoint(&public_key, Some(from)).await;
+        let learn_endpoint = punching || entry.state.is_direct();
+        let mut became_direct = false;
         if let Some(entry) = self.peers.get_mut(&name) {
-            if punching {
+            match &mut entry.state {
+                PunchState::Punching { .. } => became_direct = true,
+                // 端点漂移 (对端 NAT 重映射): 跟随新端点并刷新活性
+                PunchState::Direct {
+                    endpoint,
+                    last_alive,
+                    ..
+                } => {
+                    *endpoint = from;
+                    *last_alive = now;
+                }
+                // 无打洞意图 (Relayed / Idle): 只应答, 不动在用路径,
+                // 直连由本端自己的重试窗口裁决
+                _ => {}
+            }
+            if became_direct {
                 tracing::info!(peer = %name, endpoint = %from, "打洞成功, 切换直连");
-                entry.state = PunchState::Direct { endpoint: from };
+                entry.state = PunchState::Direct {
+                    endpoint: from,
+                    last_alive: now,
+                    next_ping,
+                };
             }
         }
-        if let Some(frame) = reply {
+        self.reverse.insert(from, name.clone());
+        if learn_endpoint {
+            let _ = self.engine.set_endpoint(&public_key, Some(from)).await;
+        }
+        if kind == ProbeKind::Ping {
             if let Some(udp) = self.hub.udp() {
-                let _ = udp.send_to(&frame, from).await;
+                let pong = encode_probe(ProbeKind::Pong, &self.options.name, &token);
+                let _ = udp.send_to(&pong, from).await;
             }
         }
         self.refresh_status();
     }
 
-    /// 观测到来自某端点的 WG 流量: 打洞成功 / 端点漂移确认。
+    /// 观测到来自某端点的 WG 流量 (首见来源): 打洞成功 / 端点漂移确认。
+    /// 后续流量不再上报 (传输层去重), 持续活性由周期 Ping 承担。
     fn on_activity(&mut self, source: SocketAddr) {
         let Some(name) = self.reverse.get(&source).cloned() else {
             return;
@@ -489,74 +571,194 @@ where
         let Some(entry) = self.peers.get_mut(&name) else {
             return;
         };
-        match entry.state {
-            PunchState::Punching { .. } => {
-                tracing::info!(peer = %name, endpoint = %source, "打洞成功, 切换直连");
-                entry.state = PunchState::Direct { endpoint: source };
+        let now = Instant::now();
+        let next_ping = now + self.options.timings.ping;
+        let punching = entry.state.is_punching();
+        let drift =
+            matches!(&entry.state, PunchState::Direct { endpoint, .. } if *endpoint != source);
+        if punching {
+            tracing::info!(peer = %name, endpoint = %source, "打洞成功, 切换直连");
+            entry.state = PunchState::Direct {
+                endpoint: source,
+                last_alive: now,
+                next_ping,
+            };
+        } else if drift {
+            // 端点漂移 (对端 NAT 重映射): 跟随新端点
+            if let PunchState::Direct {
+                endpoint,
+                last_alive,
+                ..
+            } = &mut entry.state
+            {
+                *endpoint = source;
+                *last_alive = now;
             }
-            PunchState::Direct { endpoint } if endpoint != source => {
-                // 端点漂移 (对端 NAT 重映射): 跟随新端点
-                entry.state = PunchState::Direct { endpoint: source };
-            }
-            _ => {}
         }
         self.refresh_status();
     }
 
-    /// 打洞节拍: 突发探测 + 窗口到期回落。
+    /// 路径节拍 (PROBE_INTERVAL): 打洞突发 / 窗口到期 / Direct 保活 Ping 与
+    /// 失活判定 / Relayed 周期重试 (FR-6: 直连中断切中继, 直连恢复切回)。
     async fn on_probe_tick(&mut self) {
-        let now = std::time::Instant::now();
-        let mut bursts: Vec<(Vec<SocketAddr>, String, PunchToken)> = Vec::new();
-        let mut expired: Vec<String> = Vec::new();
-        for (name, entry) in self.peers.iter_mut() {
-            if let PunchState::Punching { deadline, token } = &mut entry.state {
-                if now >= *deadline {
-                    expired.push(name.clone());
-                } else if entry.online && !entry.candidates.is_empty() {
-                    bursts.push((entry.candidates.clone(), name.clone(), *token));
-                }
-            }
-        }
-        for (candidates, name, token) in bursts {
+        let actions = self.scan_tick_actions(Instant::now());
+        for (candidates, name, token) in actions.bursts {
             self.send_probes(&candidates, &name, &token);
         }
-        for name in expired {
-            let Some((vip, public_key)) = self
-                .peers
-                .get(&name)
-                .map(|entry| (entry.vip, entry.public_key))
-            else {
-                continue;
-            };
-            match self.pick_relay(vip) {
-                Some(pseudo) => {
-                    tracing::info!(peer = %name, relay_endpoint = %pseudo, "打洞超时, 回落中继 (FR-3)");
-                    if let Some(entry) = self.peers.get_mut(&name) {
-                        entry.state = PunchState::Relayed { endpoint: pseudo };
-                    }
-                    let _ = self.engine.set_endpoint(&public_key, Some(pseudo)).await;
-                }
-                None => {
-                    tracing::warn!(peer = %name, "打洞超时且无可用中继, 保持等待");
-                    if let Some(entry) = self.peers.get_mut(&name) {
-                        entry.state = PunchState::Idle;
-                    }
-                }
-            }
+        for (endpoint, name) in actions.pings {
+            let token = PunchToken::random();
+            self.send_probes(&[endpoint], &name, &token);
+        }
+        for (name, fallback) in actions.expired {
+            self.on_punch_expired(name, fallback).await;
+        }
+        for name in actions.dead {
+            self.on_direct_dead(name).await;
+        }
+        for (name, fallback) in actions.retries {
+            self.begin_punch(&name, fallback);
         }
         self.refresh_status();
     }
 
-    /// 突发探测: 帧携带本节点名 (接收方以此归位发送者), 发往对端全部候选。
-    fn send_probes(&self, candidates: &[SocketAddr], peer: &str, token: &PunchToken) {
+    /// 扫描路径状态, 收集推进到当前时刻应执行的动作 (纯状态推进, 无 IO;
+    /// 执行侧含 await 与引擎调用, 分离以保持节拍主体可读)。
+    fn scan_tick_actions(&mut self, now: Instant) -> TickActions {
+        let timings = self.options.timings.clone();
+        let auto = self.policy() == PathPolicy::Auto;
+        let mut actions = TickActions::default();
+        for (name, entry) in self.peers.iter_mut() {
+            match &mut entry.state {
+                PunchState::Punching {
+                    deadline,
+                    token,
+                    fallback,
+                } => {
+                    if now >= *deadline {
+                        actions.expired.push((name.clone(), *fallback));
+                    } else if entry.online && !entry.candidates.is_empty() {
+                        actions
+                            .bursts
+                            .push((entry.candidates.clone(), name.clone(), *token));
+                    }
+                }
+                PunchState::Direct {
+                    endpoint,
+                    last_alive,
+                    next_ping,
+                } => {
+                    if now >= *next_ping {
+                        actions.pings.push((*endpoint, name.clone()));
+                        *next_ping = now + timings.ping;
+                    }
+                    if now.duration_since(*last_alive) >= timings.dead_after {
+                        actions.dead.push(name.clone());
+                    }
+                }
+                PunchState::Relayed {
+                    endpoint,
+                    next_retry,
+                } => {
+                    if auto && entry.online && !entry.candidates.is_empty() && now >= *next_retry {
+                        actions.retries.push((name.clone(), Some(*endpoint)));
+                    }
+                }
+                PunchState::Idle => {}
+            }
+        }
+        actions
+    }
+
+    /// 打洞窗口到期: fallback (既有中继路径) 仍在线才直接回退, 流量未中断;
+    /// 中继在窗口期死亡 / 失联时重选在线中继, 避免锚定死端点无法自愈;
+    /// 无 fallback 时回落中继 (FR-3) 或无中继可用则回 Idle 等待。
+    async fn on_punch_expired(&mut self, name: String, fallback: Option<SocketAddr>) {
+        let next_retry = Instant::now() + self.options.timings.retry;
+        let fallback = fallback.filter(|pseudo| {
+            PathHub::split_pseudo(*pseudo)
+                .map(|(id, _)| self.hub.relay_online(id))
+                .unwrap_or(false)
+        });
+        if let Some(pseudo) = fallback {
+            tracing::info!(peer = %name, "重试打洞未果, 保持中继 (FR-6)");
+            if let Some(entry) = self.peers.get_mut(&name) {
+                entry.state = PunchState::Relayed {
+                    endpoint: pseudo,
+                    next_retry,
+                };
+            }
+            return;
+        }
+        let Some((vip, public_key)) = self
+            .peers
+            .get(&name)
+            .map(|entry| (entry.vip, entry.public_key))
+        else {
+            return;
+        };
+        match self.pick_relay(vip) {
+            Some(pseudo) => {
+                tracing::info!(peer = %name, relay_endpoint = %pseudo, "打洞超时, 回落中继 (FR-3)");
+                if let Some(entry) = self.peers.get_mut(&name) {
+                    entry.state = PunchState::Relayed {
+                        endpoint: pseudo,
+                        next_retry,
+                    };
+                }
+                let _ = self.engine.set_endpoint(&public_key, Some(pseudo)).await;
+            }
+            None => {
+                tracing::warn!(peer = %name, "打洞超时且无可用中继, 保持等待");
+                if let Some(entry) = self.peers.get_mut(&name) {
+                    entry.state = PunchState::Idle;
+                }
+            }
+        }
+    }
+
+    /// 直连失活 (超过阈值无探测 / WG 流量证据): 回落中继, 到重试节拍再尝试
+    /// 切回直连 (FR-6)。失活已静默一个 dead_after 窗口, 立即再打洞的边际收益
+    /// 有限, 统一交由 Relayed 的周期重试接管, 也避免对端真正离线时探测风暴。
+    async fn on_direct_dead(&mut self, name: String) {
+        let Some((vip, public_key)) = self
+            .peers
+            .get(&name)
+            .map(|entry| (entry.vip, entry.public_key))
+        else {
+            return;
+        };
+        let next_retry = Instant::now() + self.options.timings.retry;
+        match self.pick_relay(vip) {
+            Some(pseudo) => {
+                tracing::warn!(peer = %name, relay_endpoint = %pseudo, "直连失活, 回落中继 (FR-6)");
+                if let Some(entry) = self.peers.get_mut(&name) {
+                    entry.state = PunchState::Relayed {
+                        endpoint: pseudo,
+                        next_retry,
+                    };
+                }
+                let _ = self.engine.set_endpoint(&public_key, Some(pseudo)).await;
+            }
+            None => {
+                tracing::warn!(peer = %name, "直连失活且无可用中继, 回到等待");
+                if let Some(entry) = self.peers.get_mut(&name) {
+                    entry.state = PunchState::Idle;
+                }
+            }
+        }
+    }
+
+    /// 突发探测: 帧携带本节点名 (接收方以此归位发送者), 发往全部目标地址;
+    /// 打洞窗口内为候选突发, Direct 态为单点保活 Ping。
+    fn send_probes(&self, targets: &[SocketAddr], peer: &str, token: &PunchToken) {
         let Some(udp) = self.hub.udp() else {
             return;
         };
-        let frame = encode_probe(&self.options.name, token);
-        for candidate in candidates {
-            let _ = udp.try_send_to(&frame, *candidate);
+        let frame = encode_probe(ProbeKind::Ping, &self.options.name, token);
+        for target in targets {
+            let _ = udp.try_send_to(&frame, *target);
         }
-        tracing::debug!(peer = %peer, candidates = candidates.len(), "探测突发已发出");
+        tracing::debug!(peer = %peer, targets = targets.len(), "探测已发出");
     }
 
     /// 选择回落中继: 列表序首个在线连接 (核心内置恒在末位兜底)。
@@ -692,9 +894,10 @@ where
 
     async fn repoint_relayed(&mut self, id: u8) {
         let names: Vec<String> = self.peers.keys().cloned().collect();
+        let next_retry = Instant::now() + self.options.timings.retry;
         for name in names {
             let Some((vip, public_key, relay_id)) = self.peers.get(&name).and_then(|entry| {
-                if let PunchState::Relayed { endpoint } = entry.state {
+                if let PunchState::Relayed { endpoint, .. } = entry.state {
                     PathHub::split_pseudo(endpoint)
                         .map(|(rid, _)| (entry.vip, entry.public_key, rid))
                 } else {
@@ -709,7 +912,10 @@ where
             match self.pick_relay(vip) {
                 Some(pseudo) => {
                     if let Some(entry) = self.peers.get_mut(&name) {
-                        entry.state = PunchState::Relayed { endpoint: pseudo };
+                        entry.state = PunchState::Relayed {
+                            endpoint: pseudo,
+                            next_retry,
+                        };
                     }
                     let _ = self.engine.set_endpoint(&public_key, Some(pseudo)).await;
                 }

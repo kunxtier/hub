@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-26, ik-advance T07)
+## 当前实际结构 (2026-10-26, ik-advance T08)
 
 ```text
 hub/
@@ -53,9 +53,9 @@ hub/
 │       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit + client_tls (ureq 装配)
 │       │                         #   + signaling (信令 WS, 候选广播 / 策略推送) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
 │       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
-│       └── kunxtier-node/        # 节点数据面: engine + tun + identity
-│                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (探测与状态机)
-│                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配)
+│       └── kunxtier-node/        # 节点数据面: engine + tun + identity + netconf (网段冲突检测)
+│                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (PING/PONG 探测与路径状态机)
+│                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配, PathTimings 节奏)
 ├── CLAUDE.md                     # 已创建
 └── web/                          # 未建 (控制台前端阶段落地)
 ```
@@ -81,5 +81,11 @@ hub/
 - 2026-10-26 (T07): 打洞成功判据 = 收到对端探测帧 (观测源即双向通路证明: 对端 NAT 映射对本地址可用); WG 握手是按需的, 首个业务包才触发, 不作为直连判定必要条件, WG 流量事件退化为端点漂移监测。探测回执条件 "打洞中或新令牌", 防回声环且支撑策略恢复后的重打洞。
 - 2026-10-26 (T07): PinVerifier 自 relay::client_tls 移驻 kunxtier-core::tls——节点信令 / 转发客户端与卫星客户端共用指纹固定校验, relay 侧仅留 ureq agent 装配。
 - 2026-10-26 (T07 边界前移): 复合传输自 T08 提前至 T07 交付 (超时回落与强制中继的验收都要求流量真正走中继); T08 保留切换恢复精化 (周期重试直连)、CGNAT 冲突检测、保活与 MTU 精推。
+- 2026-10-26 (T08 探测帧升级): 探测帧由单类扩展为 PING/PONG (帧加 1B 帧类)——原 "打洞中或新令牌才回执" 的防回声条件使 Direct 态无法安全发起周期保活探测 (会形成回执风暴); PONG 回显令牌且不再触发应答, 消除回声环, 失活检测 (FR-6) 才有观测来源。
+- 2026-10-26 (T08 重试保活语义): Punching 携带 fallback 既有端点 (回落后的重打洞、周期重试均不中断在用中继流量); 路径节奏 (ping 15s / dead_after 60s / retry 30s / punch_window 5s) 收敛为 PathTimings 进 NodeOptions, 生产默认与 e2e 小值同构驱动。
+- 2026-10-26 (T08 MTU 裁决): DEFAULT_MTU 取 1440——两路径约束不对称, 直连 (WG over UDP) 有硬上限 (1500-60=1440), 中继 (WG over TLS over TCP) 叠加头但 TCP 流式分段吸收无内层硬上限, 故取直连上限; e2e "ping -s 1400" (IP 1428) 是下限约束, 1280 过保守、1380 不满足。
+- 2026-10-26 (T08 冲突检测边界): netconf 只比对接口地址 (含掩码网络, 双向区间相交); 系统路由表全量解析跨平台脆弱、误拒比漏报代价高, 列为 e2e 反馈项。枚举失败按无冲突放行 (防断网保护不阻断组网)。
+- 2026-10-26 (T08 实施期修复): 其一, ForceRelay 下对端探测帧会把引擎端点拉回真实地址破坏 FR-10——现完全忽略探测 (不学端点不应答); 其二, 中继通道原仅 5s 对齐节拍建连 (首个节拍早于 State 到达时列表为空), 现列表首达即建, 失活判定与短打洞窗口不再落空。
+- 2026-10-26 (T08 依赖): 新增 if-addrs 0.15 (节点接口枚举, 三平台 getifaddrs / GetAdaptersAddresses 封装, 供 netconf)。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

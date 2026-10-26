@@ -29,7 +29,7 @@ tasks:
     owner: "NODE"
   - id: "T08"
     title: "kunxtier-node 路径管理: 直连/中继切换与恢复、路由与本地网段冲突检测、保活与 MTU 策略"
-    status: "todo"
+    status: "done"
     owner: "NODE"
   - id: "T09"
     title: "kunxtier-cli 子命令与本地 IPC: relay/console/daemon/up/down/status/admin"
