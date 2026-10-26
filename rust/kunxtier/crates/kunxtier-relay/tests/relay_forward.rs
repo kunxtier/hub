@@ -40,6 +40,7 @@ async fn start_core(dir: &Path) -> Ctx {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         advertise: None,
+        stun_servers: Vec::new(),
     };
     let out = kunxtier_relay::init(&cfg).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -51,6 +52,7 @@ async fn start_core(dir: &Path) -> Ctx {
             kind: "core".into(),
             fingerprint: out.fingerprint.clone(),
         },
+        Vec::new(),
     ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
@@ -216,7 +218,7 @@ async fn forward_bind_claim(addr: SocketAddr, fp: &str, ip: &str) -> (WsClient, 
 }
 
 /// 取下一帧二进制转发帧并解码。
-async fn next_frame(ws: &mut WsClient) -> (Ipv4Addr, Vec<u8>) {
+async fn next_frame(ws: &mut WsClient) -> (Ipv4Addr, Ipv4Addr, Vec<u8>) {
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
@@ -227,8 +229,8 @@ async fn next_frame(ws: &mut WsClient) -> (Ipv4Addr, Vec<u8>) {
                 ws.send(WsMessage::Pong(p)).await.unwrap();
             }
             Ok(WsMessage::Binary(b)) => {
-                let (dst, payload) = decode_forward_frame(&b).expect("服务端帧必须可解码");
-                return (dst, payload.to_vec());
+                let (dst, src, payload) = decode_forward_frame(&b).expect("服务端帧必须可解码");
+                return (dst, src, payload.to_vec());
             }
             Ok(_) => continue,
             Err(_) => panic!("转发通道错误"),
@@ -270,31 +272,37 @@ async fn core_builtin_forward_between_nodes() {
     let (mut wb, bound_b) = forward_auth_core(ctx.addr, &ctx.fp, "nb", &cred_b).await;
     assert_eq!(bound_b["ip"], ip_b);
 
-    // A → B: 帧原样投递, 目的字段即接收方地址
+    // A → B: 帧原样投递, 目的字段即接收方地址, 源字段随帧透传
     let dst_b: Ipv4Addr = ip_b.parse().unwrap();
+    let src_a: Ipv4Addr = ip_a.parse().unwrap();
     wa.send(WsMessage::Binary(
-        encode_forward_frame(dst_b, &[0xaa, 0xbb, 0xcc]).into(),
+        encode_forward_frame(dst_b, src_a, &[0xaa, 0xbb, 0xcc]).into(),
     ))
     .await
     .unwrap();
-    let (dst, payload) = next_frame(&mut wb).await;
+    let (dst, src, payload) = next_frame(&mut wb).await;
     assert_eq!(dst, dst_b);
+    assert_eq!(src, src_a);
     assert_eq!(payload, vec![0xaa, 0xbb, 0xcc]);
 
     // B → A 反向
     let dst_a: Ipv4Addr = ip_a.parse().unwrap();
-    wb.send(WsMessage::Binary(encode_forward_frame(dst_a, &[1]).into()))
-        .await
-        .unwrap();
-    let (dst, payload) = next_frame(&mut wa).await;
+    wb.send(WsMessage::Binary(
+        encode_forward_frame(dst_a, ip_b.parse().unwrap(), &[1]).into(),
+    ))
+    .await
+    .unwrap();
+    let (dst, _src, payload) = next_frame(&mut wa).await;
     assert_eq!(dst, dst_a);
     assert_eq!(payload, vec![1]);
 
     // 未知目的: 静默丢弃, 连接保持可用 (UDP 语义)
     let ghost: Ipv4Addr = "100.64.0.99".parse().unwrap();
-    wa.send(WsMessage::Binary(encode_forward_frame(ghost, &[9]).into()))
-        .await
-        .unwrap();
+    wa.send(WsMessage::Binary(
+        encode_forward_frame(ghost, src_a, &[9]).into(),
+    ))
+    .await
+    .unwrap();
     send_json(&mut wa, json!({"type": "ping"})).await;
     let pong = next_msg(&mut wa).await;
     assert_eq!(pong["type"], "pong");
@@ -357,11 +365,11 @@ async fn satellite_register_list_and_forward() {
     assert_eq!(bound_b["ip"], ip_b);
     let dst_b: Ipv4Addr = ip_b.parse().unwrap();
     sa.send(WsMessage::Binary(
-        encode_forward_frame(dst_b, &[7, 7, 7]).into(),
+        encode_forward_frame(dst_b, ip_a.parse().unwrap(), &[7, 7, 7]).into(),
     ))
     .await
     .unwrap();
-    let (dst, payload) = next_frame(&mut sb).await;
+    let (dst, _src, payload) = next_frame(&mut sb).await;
     assert_eq!(dst, dst_b);
     assert_eq!(payload, vec![7, 7, 7]);
 

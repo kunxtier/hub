@@ -7,6 +7,7 @@
 //! - sync_peers: 信令节点表驱动的全量对齐 (T04 State 推送的消费端)
 //! - set_endpoint: 打洞结果回填 (T07 并发打洞的落点)
 //! - listen_port: 候选地址上报 (T07 STUN 探测的端口来源)
+//!
 //! 传输层保持可插拔: 生产路径为真实 UDP + TUN 适配; 中继路径传输随 T08 以
 //! 自定义 UdpTransportFactory 接入, 引擎层不感知路径形态。
 

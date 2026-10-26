@@ -124,7 +124,12 @@ args = ["clean"]
 
 # ---- 缺省流程 ----
 
+[tasks.verify]
+category = "流程"
+description = "提交前一键检查: 格式校验 + 静态检查 + 编译 + 全量测试"
+dependencies = ["lint", "build", "test"]
+
 [tasks.default]
 category = "流程"
-description = "缺省流程: 格式校验 + 静态检查 + 测试"
-dependencies = ["lint", "test"]
+description = "缺省流程: 即 verify (提交前一键检查)"
+dependencies = ["verify"]

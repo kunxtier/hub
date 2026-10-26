@@ -335,7 +335,7 @@ async fn handle_frame(
             match decode_forward_frame(&frame) {
                 // 原帧整体投递 (帧头对上下行同构, 接收方以自身 IP 校验目的);
                 // 未知目的 / 慢消费按 UDP 语义静默丢弃: 不回执, 不逐帧记日志
-                Some((dst, _)) => {
+                Some((dst, _src, _payload)) => {
                     let _ = forward.route(&dst, frame);
                     None
                 }
@@ -445,12 +445,13 @@ mod tests {
         let (tx, mut rx) = downstream();
         reg.bind(a, tx);
         // 目的命中: 原帧投递 (帧头保留)
-        let frame = kunxtier_core::protocol::encode_forward_frame(b, &[9, 9]);
+        let frame = kunxtier_core::protocol::encode_forward_frame(b, a, &[9, 9]);
         assert!(reg.route(&a, frame));
         match rx.try_recv() {
             Ok(Downstream::Data(bytes)) => {
-                let (dst, payload) = decode_forward_frame(&bytes).unwrap();
+                let (dst, src, payload) = decode_forward_frame(&bytes).unwrap();
                 assert_eq!(dst, b);
+                assert_eq!(src, a);
                 assert_eq!(payload, &[9, 9]);
             }
             other => panic!("期望数据帧, 实际: {other:?}"),

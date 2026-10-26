@@ -9,4 +9,5 @@ pub mod address;
 pub mod config;
 pub mod error;
 pub mod protocol;
+pub mod tls;
 pub mod token;

@@ -13,6 +13,9 @@ pub enum Error {
     #[error("WG 引擎错误: {0}")]
     Engine(#[from] EngineError),
 
+    #[error("传输错误: {0}")]
+    Transport(String),
+
     #[error("密钥错误: {0}")]
     Key(String),
 

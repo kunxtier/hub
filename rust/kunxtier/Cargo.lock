@@ -1268,6 +1268,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "rand",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1279,14 +1280,27 @@ dependencies = [
 name = "kunxtier-node"
 version = "0.1.0"
 dependencies = [
+ "axum-server",
  "base64",
+ "futures-util",
  "gotatun",
  "ipnetwork",
+ "kunxtier-core",
+ "kunxtier-relay",
  "rand",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
  "tracing-subscriber",
  "tun-rs",
+ "ureq",
 ]
 
 [[package]]

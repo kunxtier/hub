@@ -372,10 +372,17 @@ async fn announce_and_push(
     let nodes =
         build_state_nodes(state, &auth.network).map_err(|e| format!("节点表查询失败: {e}"))?;
     let self_entry = nodes.iter().find(|p| p.name == auth.name).cloned();
+    // 策略以库存为准 (admin 可在节点离线期间变更, FR-10)
+    let policy = state
+        .lock_store()
+        .node_policy(&auth.network, &auth.name)
+        .map_err(|e| format!("策略查询失败: {e}"))?
+        .unwrap_or(PathPolicy::Auto);
     let state_msg = SignalServerMsg::State {
         nodes,
         relays: state.relay_list(),
-        policy: PathPolicy::Auto,
+        policy,
+        stuns: state.stuns.clone(),
     };
     send_strict(socket, &state_msg)
         .await
@@ -403,6 +410,13 @@ fn build_state_nodes(state: &AppState, network: &str) -> Result<Vec<SignalPeer>>
         }
     }
     Ok(nodes)
+}
+
+/// 策略变更定向推送 (admin 设置时调用); 节点不在线则无动作 (重连后经 State 补齐)。
+pub(crate) fn push_policy(state: &AppState, network: &str, name: &str, policy: PathPolicy) {
+    state
+        .online
+        .send_to(network, name, SignalServerMsg::Policy { policy });
 }
 
 /// 处理认证后的客户端消息; 返回 Some(原因) 表示会话结束。
@@ -453,6 +467,17 @@ async fn handle_client_msg(
                 .await;
             } else {
                 state.online.set_candidates(key, gen, candidates);
+                // 候选更新是打洞触发源: 以刷新条目广播同网 (不含自身),
+                // 对端据此启动 / 更新并发打洞目标 (FR-2)
+                if let Ok(nodes) = build_state_nodes(state, &key.0) {
+                    if let Some(entry) = nodes.into_iter().find(|p| p.name == key.1) {
+                        state.online.broadcast(
+                            &key.0,
+                            SignalServerMsg::PeerOnline { peer: entry },
+                            Some(&key.1),
+                        );
+                    }
+                }
             }
         }
         SignalClientMsg::Signal { to, payload } => {

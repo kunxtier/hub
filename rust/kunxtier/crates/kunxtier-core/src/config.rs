@@ -17,9 +17,17 @@ pub const DEFAULT_DATA_DIR: &str = "./kunxtier-state";
 pub const ENV_LISTEN: &str = "KUNXTIER_LISTEN";
 pub const ENV_DATA_DIR: &str = "KUNXTIER_DATA_DIR";
 pub const ENV_ADVERTISE: &str = "KUNXTIER_ADVERTISE";
+pub const ENV_STUN: &str = "KUNXTIER_STUN";
 pub const ENV_CORE: &str = "KUNXTIER_CORE";
 pub const ENV_RELAY_TOKEN: &str = "KUNXTIER_RELAY_TOKEN";
 pub const ENV_FINGERPRINT: &str = "KUNXTIER_FINGERPRINT";
+
+/// 缺省公共 STUN 列表 (host:port): 打洞探测的候选地址来源, 经信令 State 下发给节点。
+pub const DEFAULT_STUN_SERVERS: &[&str] = &[
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun.cloudflare.com:3478",
+];
 
 /// 文件层 (relay.toml)。
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -28,6 +36,8 @@ pub struct FileConfig {
     pub data_dir: Option<String>,
     /// 对外公布的本机地址 (中继列表内置条目用); 卫星模式即注册声明地址。
     pub advertise: Option<String>,
+    /// 公共 STUN 服务器列表 (host:port), 整组覆盖缺省。
+    pub stun_servers: Option<Vec<String>>,
 }
 
 impl FileConfig {
@@ -51,6 +61,8 @@ pub struct RelayConfig {
     pub data_dir: PathBuf,
     /// 对节点公布的本机地址; 缺省在监听地址具体 (非 0.0.0.0) 时取监听地址。
     pub advertise: Option<SocketAddr>,
+    /// 公共 STUN 服务器列表 (host:port), 经信令下发给节点做候选地址探测。
+    pub stun_servers: Vec<String>,
 }
 
 impl RelayConfig {
@@ -80,9 +92,22 @@ impl RelayConfig {
                     .map_err(|_| Error::Config("advertise 不是合法的 SocketAddr".into()))?,
             ),
         };
+        let stun_servers = match env(ENV_STUN).filter(|s| !s.is_empty()) {
+            // env 为整组覆盖 (逗号分隔); 条目格式留待节点侧解析时校验
+            Some(s) => s
+                .split(',')
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => file
+                .stun_servers
+                .unwrap_or_else(|| DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()).collect()),
+        };
         Ok(RelayConfig {
             listen,
             advertise,
+            stun_servers,
             data_dir: PathBuf::from(pick(
                 cli.data_dir,
                 ENV_DATA_DIR,
@@ -206,6 +231,30 @@ mod tests {
             RelayConfig::resolve(CliOverrides::default(), no_env, FileConfig::default()).unwrap();
         assert_eq!(cfg.listen.to_string(), "0.0.0.0:443");
         assert_eq!(cfg.data_dir, PathBuf::from("./kunxtier-state"));
+        assert_eq!(
+            cfg.stun_servers,
+            DEFAULT_STUN_SERVERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stun_list_env_overrides_file_overrides_default() {
+        // env 整组覆盖
+        let env = |k: &str| (k == ENV_STUN).then(|| "1.1.1.1:3478, 2.2.2.2:3478".to_string());
+        let cfg =
+            RelayConfig::resolve(CliOverrides::default(), env, FileConfig::default()).unwrap();
+        assert_eq!(cfg.stun_servers, vec!["1.1.1.1:3478", "2.2.2.2:3478"]);
+
+        // 文件层覆盖缺省
+        let file = FileConfig {
+            stun_servers: Some(vec!["3.3.3.3:3478".into()]),
+            ..FileConfig::default()
+        };
+        let cfg = RelayConfig::resolve(CliOverrides::default(), no_env, file).unwrap();
+        assert_eq!(cfg.stun_servers, vec!["3.3.3.3:3478"]);
     }
 
     #[test]
@@ -219,6 +268,7 @@ mod tests {
             listen: Some("2.2.2.2:2222".into()),
             data_dir: Some("./from-file".into()),
             advertise: None,
+            stun_servers: None,
         };
 
         // 三层齐设: CLI 胜出
@@ -249,6 +299,7 @@ mod tests {
             listen: Some("2.2.2.2:2222".into()),
             data_dir: None,
             advertise: None,
+            stun_servers: None,
         };
         let cfg = RelayConfig::resolve(CliOverrides::default(), env, file).unwrap();
         assert_eq!(cfg.listen.to_string(), "2.2.2.2:2222");
@@ -270,6 +321,7 @@ mod tests {
             listen: listen.parse().unwrap(),
             advertise: advertise.map(|a| a.parse().unwrap()),
             data_dir: PathBuf::from("./kunxtier-state"),
+            stun_servers: Vec::new(),
         };
         // advertise 显式指定: 直接采用
         assert_eq!(

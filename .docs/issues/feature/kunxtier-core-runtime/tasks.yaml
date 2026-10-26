@@ -25,7 +25,7 @@ tasks:
     owner: "NODE"
   - id: "T07"
     title: "kunxtier-node 打洞与路径策略: STUN 探测、并发打洞、超时回落、节点级强制中继"
-    status: "todo"
+    status: "done"
     owner: "NODE"
   - id: "T08"
     title: "kunxtier-node 路径管理: 直连/中继切换与恢复、路由与本地网段冲突检测、保活与 MTU 策略"

@@ -13,12 +13,12 @@ use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use kunxtier_core::address;
-use kunxtier_core::protocol::{NetworkInfo, NodeInfo, SignalPeer};
+use kunxtier_core::protocol::{NetworkInfo, NodeInfo, PathPolicy, SignalPeer};
 use kunxtier_core::token::{self, Kind};
 
 use crate::{Error, Result};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     conn: Connection,
@@ -54,6 +54,7 @@ fn hash_b64(plain: &str) -> String {
 /// 节点表行映射 (list_nodes 共用)。
 fn node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeInfo> {
     let ip_u32: u32 = r.get(1)?;
+    let policy: String = r.get(5)?;
     Ok(NodeInfo {
         network: r.get(4)?,
         name: r.get(0)?,
@@ -62,6 +63,7 @@ fn node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeInfo> {
         created_at: r.get(3)?,
         // 在线态由服务端注册表合并, 存储层一律填 false
         online: false,
+        policy: policy.parse().unwrap_or(PathPolicy::Auto),
     })
 }
 
@@ -131,7 +133,21 @@ impl Store {
             )));
         }
         if cur < SCHEMA_VERSION {
-            // v1: 初始结构已由上方 IF NOT EXISTS 建立, 此处落版本戳
+            // v2: 节点级路径策略 (FR-10)。新建库由下方 ALTER 统一补列,
+            // 与 v1 存量库走同一路径, 避免两份建表语句漂移。
+            let has_policy: bool = self
+                .conn
+                .prepare("PRAGMA table_info(nodes)")?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<String>, _>>()?
+                .iter()
+                .any(|c| c == "policy");
+            if !has_policy {
+                self.conn.execute(
+                    "ALTER TABLE nodes ADD COLUMN policy TEXT NOT NULL DEFAULT 'auto'",
+                    [],
+                )?;
+            }
             self.conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -527,13 +543,13 @@ impl Store {
     }
 
     pub fn list_nodes(&self, network: Option<&str>) -> Result<Vec<NodeInfo>> {
-        const SQL_ALL: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name
+        const SQL_ALL: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name, n.policy
              FROM nodes n
              JOIN networks nw ON nw.id = n.network_id
              LEFT JOIN users u ON u.id = n.user_id
              WHERE n.removed_at IS NULL
              ORDER BY n.id";
-        const SQL_BY_NETWORK: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name
+        const SQL_BY_NETWORK: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name, n.policy
              FROM nodes n
              JOIN networks nw ON nw.id = n.network_id
              LEFT JOIN users u ON u.id = n.user_id
@@ -577,6 +593,38 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// 节点级路径策略查询 (FR-10): 信令 State 初始化推送用。
+    pub fn node_policy(&self, network: &str, name: &str) -> Result<Option<PathPolicy>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT n.policy
+                 FROM nodes n
+                 JOIN networks nw ON nw.id = n.network_id
+                 WHERE nw.name = ?1 AND n.name = ?2 AND n.removed_at IS NULL",
+                params![network, name],
+                |r| {
+                    let s: String = r.get(0)?;
+                    Ok(s.parse().unwrap_or(PathPolicy::Auto))
+                },
+            )
+            .optional()?)
+    }
+
+    /// 设置节点级路径策略; 目标不存在返回 false (由调用方决定报错口径)。
+    pub fn set_node_policy(&self, network: &str, name: &str, policy: PathPolicy) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE nodes SET policy = ?3
+             WHERE name = ?2 AND removed_at IS NULL
+               AND network_id = (SELECT id FROM networks WHERE name = ?1)",
+            params![network, name, policy.as_str()],
+        )?;
+        if n > 0 {
+            tracing::info!(network, node = name, %policy, "节点路径策略变更");
+        }
+        Ok(n > 0)
     }
 
     /// 信令节点表: 同网全部活跃节点; 在线态与候选地址由调用方从注册表合并。
@@ -663,6 +711,47 @@ mod tests {
         assert!(cred.starts_with("kxt_nid_"));
         // 一次性: 二次消费被拒
         assert!(s.consume_node_token(&token, "laptop2", &wg_key()).is_err());
+    }
+
+    #[test]
+    fn node_policy_roundtrip_and_unknown_node() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_user("default", "alice").unwrap();
+        let (_id, t) = s
+            .issue_token("default", Some("alice"), "node", 3600)
+            .unwrap();
+        s.consume_node_token(&t, "laptop", &wg_key()).unwrap();
+
+        // 缺省 auto; 设置 / 读取 / 再切回
+        assert_eq!(
+            s.node_policy("default", "laptop").unwrap(),
+            Some(PathPolicy::Auto)
+        );
+        assert!(s
+            .set_node_policy("default", "laptop", PathPolicy::ForceRelay)
+            .unwrap());
+        assert_eq!(
+            s.node_policy("default", "laptop").unwrap(),
+            Some(PathPolicy::ForceRelay)
+        );
+        assert_eq!(
+            s.list_nodes(Some("default")).unwrap()[0].policy,
+            PathPolicy::ForceRelay
+        );
+        assert!(s
+            .set_node_policy("default", "laptop", PathPolicy::Auto)
+            .unwrap());
+        assert_eq!(
+            s.node_policy("default", "laptop").unwrap(),
+            Some(PathPolicy::Auto)
+        );
+
+        // 不存在的节点: 拒绝设置, 查询为空
+        assert!(!s
+            .set_node_policy("default", "ghost", PathPolicy::ForceRelay)
+            .unwrap());
+        assert_eq!(s.node_policy("default", "ghost").unwrap(), None);
     }
 
     #[test]
@@ -864,6 +953,6 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v, "1");
+        assert_eq!(v, SCHEMA_VERSION.to_string());
     }
 }

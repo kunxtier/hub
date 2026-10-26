@@ -29,7 +29,6 @@ use kunxtier_core::config::SatelliteConfig;
 use kunxtier_core::protocol::{SatelliteClientMsg, SatelliteServerMsg, SignalRelay};
 
 use crate::cert;
-use crate::client_tls::PinVerifier;
 use crate::forward::{claim_ws_handler, SatelliteState};
 use crate::server::AppState;
 use crate::{Error, Result};
@@ -443,13 +442,8 @@ async fn register_once(
     cfg: &SatelliteConfig,
     fingerprint: &str,
 ) -> std::result::Result<(), String> {
-    let tls_cfg = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinVerifier {
-            fingerprint: cfg.fingerprint.clone(),
-        }))
-        .with_no_client_auth();
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_cfg));
+    let tls_cfg = kunxtier_core::tls::pinning_client_config(&cfg.fingerprint);
+    let connector = tokio_rustls::TlsConnector::from(tls_cfg);
     let tcp = TcpStream::connect(&cfg.core)
         .await
         .map_err(|e| format!("tcp: {e}"))?;

@@ -64,6 +64,14 @@ pub struct RemoveNodeRequest {
     pub name: String,
 }
 
+/// 节点级路径策略设置 (FR-10): auto 恢复打洞, force_relay 强制中继。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetNodePolicyRequest {
+    pub network: String,
+    pub name: String,
+    pub policy: PathPolicy,
+}
+
 #[derive(Debug, Serialize)]
 pub struct NetworkInfo {
     pub name: String,
@@ -81,6 +89,8 @@ pub struct NodeInfo {
     pub created_at: i64,
     /// 是否在线 (信令通道当前状态, 由服务端注册表合并, 不落库)。
     pub online: bool,
+    /// 节点级路径策略 (FR-10)。
+    pub policy: PathPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,12 +102,40 @@ pub struct ApiErrorBody {
 // ---- 信令 WS ----
 
 /// 路径策略: 全局自动 + 节点级强制中继 (feat-kunxtier-network FR-10)。
-/// 当前实现仅 Auto; 控制台配置与信令下发策略随 T11 接入。
+/// 存于节点库存, 经信令 State 初始化下发与 Policy 变更推送; 控制台配置入口随 T11 接入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathPolicy {
     Auto,
     ForceRelay,
+}
+
+impl PathPolicy {
+    /// 存储与协议线格式 (snake_case, 与 serde 序列化一致)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathPolicy::Auto => "auto",
+            PathPolicy::ForceRelay => "force_relay",
+        }
+    }
+}
+
+impl std::str::FromStr for PathPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(PathPolicy::Auto),
+            "force_relay" => Ok(PathPolicy::ForceRelay),
+            other => Err(format!("未知路径策略: {other} (期望 auto / force_relay)")),
+        }
+    }
+}
+
+impl std::fmt::Display for PathPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// 信令节点表条目: 推送给在线节点的同网成员, 含对端 WireGuard 公钥。
@@ -125,7 +163,7 @@ pub struct SignalRelay {
 }
 
 /// 客户端 → 服务端信令消息: JSON 文本帧, type 标签分派。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalClientMsg {
     /// 认证第一步: 声明节点身份。
@@ -144,7 +182,7 @@ pub enum SignalClientMsg {
 }
 
 /// 服务端 → 客户端信令消息。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalServerMsg {
     /// 挑战: 32 字节随机 nonce 的 base64(std)。
@@ -160,10 +198,16 @@ pub enum SignalServerMsg {
     AuthErr {
         message: String,
     },
-    /// 全量节点表 + 中继列表 + 本节点策略: 认证通过后推送。
+    /// 全量节点表 + 中继列表 + 本节点策略 + STUN 列表: 认证通过后推送。
     State {
         nodes: Vec<SignalPeer>,
         relays: Vec<SignalRelay>,
+        policy: PathPolicy,
+        /// 核心配置的公共 STUN 服务器 (host:port), 供节点探测候选地址。
+        stuns: Vec<String>,
+    },
+    /// 本节点路径策略变更 (admin 设置时定向推送, FR-10)。
+    Policy {
         policy: PathPolicy,
     },
     /// 同网成员上线 (FR-5)。
@@ -201,29 +245,35 @@ pub enum SignalServerMsg {
 
 // ---- 转发 WS (/ws/relay) ----
 
-/// 转发面二进制帧: [4 字节大端目的 IPv4][不透明 WireGuard 密文]。
-/// 下行帧的目的字段即接收方本机虚拟 IP, 上下行同构 (FR-4: 中继只见密文)。
-pub const FORWARD_HEADER_BYTES: usize = 4;
+/// 转发面二进制帧: [4 字节大端目的 IPv4][4 字节大端源 IPv4][不透明 WireGuard 密文]。
+/// 中继只按首部目的路由; 源字段仅供接收方构造回程端点 (T07), 对中继同样不透明。
+/// 上下行同构 (FR-4: 中继只见密文)。
+pub const FORWARD_HEADER_BYTES: usize = 8;
 
-pub fn encode_forward_frame(dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+pub fn encode_forward_frame(dst: Ipv4Addr, src: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(FORWARD_HEADER_BYTES + payload.len());
     frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(&src.octets());
     frame.extend_from_slice(payload);
     frame
 }
 
 /// 解析转发帧; 长度不足或承载非 IPv4 语义之外的错误均由长度判定兜住。
-pub fn decode_forward_frame(bytes: &[u8]) -> Option<(Ipv4Addr, &[u8])> {
+/// 返回 (目的, 源, 密文)。
+pub fn decode_forward_frame(bytes: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, &[u8])> {
     let (head, payload) = bytes.split_at_checked(FORWARD_HEADER_BYTES)?;
     if payload.is_empty() {
         return None;
     }
-    let octets: [u8; 4] = head.try_into().expect("长度已由 split_at_checked 保证");
-    Some((Ipv4Addr::from(octets), payload))
+    // unwrap 理由: split_at_checked 已保证 8 字节, 再对半切不会越界
+    let (dst, src) = head.split_at_checked(4)?;
+    let dst: [u8; 4] = dst.try_into().expect("长度已由 split_at_checked 保证");
+    let src: [u8; 4] = src.try_into().expect("长度已由 split_at_checked 保证");
+    Some((Ipv4Addr::from(dst), Ipv4Addr::from(src), payload))
 }
 
 /// 转发面文本控制帧: 准入声明与心跳。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ForwardClientMsg {
     /// 卫星准入: 声明本机虚拟 IP (零知识模式专用; 核心模式 IP 由库存权威决定)。
@@ -232,7 +282,7 @@ pub enum ForwardClientMsg {
     Ping,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ForwardServerMsg {
     /// 绑定成功: 本端 IP 与心跳参数 (客户端不硬编码, 与信令 AuthOk 同一原则)。
@@ -284,9 +334,14 @@ mod tests {
 
     #[test]
     fn forward_frame_roundtrip() {
-        let frame = encode_forward_frame("100.64.0.7".parse().unwrap(), &[1, 2, 3]);
-        let (dst, payload) = decode_forward_frame(&frame).unwrap();
+        let frame = encode_forward_frame(
+            "100.64.0.7".parse().unwrap(),
+            "100.64.0.9".parse().unwrap(),
+            &[1, 2, 3],
+        );
+        let (dst, src, payload) = decode_forward_frame(&frame).unwrap();
         assert_eq!(dst.to_string(), "100.64.0.7");
+        assert_eq!(src.to_string(), "100.64.0.9");
         assert_eq!(payload, &[1, 2, 3]);
     }
 
@@ -296,6 +351,7 @@ mod tests {
         assert!(decode_forward_frame(&[100, 64]).is_none());
         // 头部完整但没有载荷: 不构成合法 WG 帧
         assert!(decode_forward_frame(&[100, 64, 0, 7]).is_none());
+        assert!(decode_forward_frame(&[100, 64, 0, 7, 100, 64, 0, 9]).is_none());
     }
 
     #[test]

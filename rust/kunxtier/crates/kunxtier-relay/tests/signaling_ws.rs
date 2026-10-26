@@ -47,6 +47,7 @@ async fn start_relay(dir: &Path) -> Ctx {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         advertise: None,
+        stun_servers: Vec::new(),
     };
     let out = kunxtier_relay::init(&cfg).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -54,6 +55,7 @@ async fn start_relay(dir: &Path) -> Ctx {
     let state = Arc::new(AppState::new(
         Store::open(&cfg.db_path()).unwrap(),
         builtin_relay(addr, &out.fingerprint),
+        vec!["stun.example.test:3478".to_string()],
     ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
@@ -267,6 +269,8 @@ async fn challenge_response_and_state_push() {
     let state = next_msg(&mut ws).await;
     assert_eq!(state["type"], "state");
     assert_eq!(state["policy"], "auto");
+    // STUN 列表来自核心配置, 随 State 下发 (测试装配注入单项)
+    assert_eq!(state["stuns"][0], "stun.example.test:3478");
     let relays = state["relays"].as_array().unwrap();
     assert_eq!(relays.len(), 1);
     assert_eq!(relays[0]["kind"], "core");

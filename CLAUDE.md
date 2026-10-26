@@ -5,9 +5,9 @@
 ## 当前项目
 
 - rust/kunxtier: 轻量 P2P 虚拟组网 (ZeroTier / EasyTier 平替)。cargo workspace:
-  - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置
+  - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置 / TLS 指纹固定
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
-  - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配; 打洞与路径策略按阶段推进)
+  - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时; 进度见 issue FEAT-kunxtier-core-runtime)
   - kunxtier-cli: 单一入口二进制 `kunxtier`
   - web/kunxtier-console (控制台前端) 按阶段推进再落地
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)

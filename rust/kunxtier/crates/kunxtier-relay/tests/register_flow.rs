@@ -22,6 +22,7 @@ async fn start_relay(dir: &Path) -> (SocketAddr, String, String) {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         advertise: None,
+        stun_servers: Vec::new(),
     };
     let out = kunxtier_relay::init(&cfg).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -33,6 +34,7 @@ async fn start_relay(dir: &Path) -> (SocketAddr, String, String) {
             kind: "core".into(),
             fingerprint: out.fingerprint.clone(),
         },
+        Vec::new(),
     ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await

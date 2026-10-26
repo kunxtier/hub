@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-21, ik-advance T06)
+## 当前实际结构 (2026-10-26, ik-advance T07)
 
 ```text
 hub/
@@ -48,12 +48,14 @@ hub/
 │   ├── Cargo.toml                # workspace 根 + 统一依赖版本
 │   ├── Makefile.toml             # cargo-make 任务集 (构建 / 质量 / 测试 / 运行 / 发布)
 │   └── crates/
-│       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig)
-│       ├── kunxtier-relay/       # 核心中继: store + server + init + cert + ratelimit + client_tls
-│       │                         #   + signaling (信令 WS) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
-│       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令
-│       └── kunxtier-node/        # 节点数据面: engine (WG 引擎装配 + 运行时 peer 管理)
-│                                 #   + tun (tun-rs 适配 IpSend/IpRecv) + identity (WG 密钥对)
+│       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig, stun_servers)
+│       │                         #   + tls (指纹固定 PinVerifier, 卫星与节点客户端共用)
+│       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit + client_tls (ureq 装配)
+│       │                         #   + signaling (信令 WS, 候选广播 / 策略推送) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
+│       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
+│       └── kunxtier-node/        # 节点数据面: engine + tun + identity
+│                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (探测与状态机)
+│                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配)
 ├── CLAUDE.md                     # 已创建
 └── web/                          # 未建 (控制台前端阶段落地)
 ```
@@ -73,5 +75,11 @@ hub/
 - 2026-10-21 (T06): gotatun 0.7.1 运行时加 peer 不触发连接建立 (reconfigure 只认密钥 / 端口变更 / 清空), 引擎装配时不设端口, 首次 sync_peers 经 set_listen_port 0→P 变更落地 UDP 绑定; listen_port 拒绝 0 (固定端口是打洞与候选上报前提)。
 - 2026-10-21 (T06): TUN MTU 先取保守值 1280 (DEFAULT_MTU), FR-16 的最坏路径精推与大包验证随 T08 落地。
 - 2026-10-21 (T06 测试形态): 引擎级 e2e 免特权——TUN 侧用 gotatun 通道 (UDP 语义), UDP 侧为真实 127.0.0.1 socket, 双引擎真实 noise 握手与双向互通; 真实 TUN 设备冒烟为 tun 模块 #[ignore] 用例 (需 root, 手动执行)。
+- 2026-10-26 (T07 帧格式修订): 转发帧由 [4B 目的][密文] 扩为 [4B 目的][4B 源][密文]——下行帧若无源字段, 接收方无法构造中继伪端点 (引擎按包源漂移端点); 中继仍只按首部目的路由, 零知识不变, T05 存量测试随修订。
+- 2026-10-26 (T07): 中继路径以 240/4 段伪端点折叠进引擎的 UDP 语义——伪地址 240.{中继号}.{vip 后两段}:{vip 第二段} (vip 约束在 100.64/10, 第二段 64..127 恒落端口区间); 直连与中继切换由 gotatun 端点漂移天然承担, 免独立转发状态机。
+- 2026-10-26 (T07): STUN 自实现最小子集 (Binding 无属性请求 + XOR-MAPPED-ADDRESS 解析), 不引入 STUN 库; 服务器列表为 relay 配置 (env 整组覆盖 / 文件 / 公共缺省), 经信令 State 下发。
+- 2026-10-26 (T07): 打洞成功判据 = 收到对端探测帧 (观测源即双向通路证明: 对端 NAT 映射对本地址可用); WG 握手是按需的, 首个业务包才触发, 不作为直连判定必要条件, WG 流量事件退化为端点漂移监测。探测回执条件 "打洞中或新令牌", 防回声环且支撑策略恢复后的重打洞。
+- 2026-10-26 (T07): PinVerifier 自 relay::client_tls 移驻 kunxtier-core::tls——节点信令 / 转发客户端与卫星客户端共用指纹固定校验, relay 侧仅留 ureq agent 装配。
+- 2026-10-26 (T07 边界前移): 复合传输自 T08 提前至 T07 交付 (超时回落与强制中继的验收都要求流量真正走中继); T08 保留切换恢复精化 (周期重试直连)、CGNAT 冲突检测、保活与 MTU 精推。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

@@ -20,14 +20,14 @@ use kunxtier_core::address;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::{
     ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest, IssueTokenResponse,
-    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest, SignalRelay,
-    SignalServerMsg,
+    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest,
+    SetNodePolicyRequest, SignalRelay, SignalServerMsg,
 };
 
 use crate::forward::ForwardRegistry;
 use crate::ratelimit::RateLimiter;
 use crate::satellite::SatelliteRegistry;
-use crate::signaling::OnlineRegistry;
+use crate::signaling::{self, OnlineRegistry};
 use crate::store::Store;
 use crate::{cert, Error};
 
@@ -47,10 +47,12 @@ pub struct AppState {
     pub(crate) satellites: SatelliteRegistry,
     /// 内置转发条目 (中继列表末位兜底, run 时按配置与证书装配)。
     pub(crate) builtin: SignalRelay,
+    /// 核心配置的公共 STUN 列表 (host:port), 经信令 State 下发 (FR-2)。
+    pub(crate) stuns: Vec<String>,
 }
 
 impl AppState {
-    pub fn new(store: Store, builtin: SignalRelay) -> Self {
+    pub fn new(store: Store, builtin: SignalRelay, stuns: Vec<String>) -> Self {
         AppState {
             store: Mutex::new(store),
             register_limiter: RateLimiter::new(10, Duration::from_secs(60)),
@@ -60,6 +62,7 @@ impl AppState {
             forward: ForwardRegistry::new(),
             satellites: SatelliteRegistry::new(),
             builtin,
+            stuns,
         }
     }
 
@@ -168,6 +171,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/tokens/{id}/revoke", post(revoke_token))
         .route("/api/admin/nodes", get(list_nodes))
         .route("/api/admin/nodes/remove", post(remove_node))
+        .route("/api/admin/nodes/policy", post(set_node_policy))
         .route("/ws/signal", get(crate::signaling::ws_handler))
         .route("/ws/relay", get(crate::forward::core_ws_handler))
         .route("/ws/satellite", get(crate::satellite::ws_handler))
@@ -336,6 +340,29 @@ async fn remove_node(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// 节点级路径策略设置 (FR-10): 落库后向在线节点定向推送, 离线节点重连时经 State 补齐。
+async fn set_node_policy(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<SetNodePolicyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    let updated = state
+        .lock_store()
+        .set_node_policy(&req.network, &req.name, req.policy)?;
+    if !updated {
+        return Err(ApiError::bad_request(format!(
+            "节点不存在: {}/{}",
+            req.network, req.name
+        )));
+    }
+    signaling::push_policy(&state, &req.network, &req.name, req.policy);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "policy": req.policy.to_string() }),
+    ))
+}
+
 /// 启动核心中继 (TLS)。
 pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -355,6 +382,7 @@ pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
             kind: "core".into(),
             fingerprint,
         },
+        cfg.stun_servers.clone(),
     ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
