@@ -64,6 +64,10 @@ fn node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeInfo> {
         // 在线态由服务端注册表合并, 存储层一律填 false
         online: false,
         policy: policy.parse().unwrap_or(PathPolicy::Auto),
+        // 候选地址与版本同样由信令注册表合并, 存储层填空
+        candidates: Vec::new(),
+        version: None,
+        paths: Vec::new(),
     })
 }
 

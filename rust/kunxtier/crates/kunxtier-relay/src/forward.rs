@@ -64,6 +64,11 @@ impl ForwardRegistry {
         }
     }
 
+    /// 当前在线转发端点数 (内置中继连接的节点数, admin relays 汇总用)。
+    pub fn online_count(&self) -> usize {
+        self.lock().len()
+    }
+
     /// unwrap 理由: 锁中毒即注册表状态不可信, 快速失败优于带病转发。
     fn lock(&self) -> MutexGuard<'_, Vec<(Ipv4Addr, Slot)>> {
         self.inner.lock().unwrap()

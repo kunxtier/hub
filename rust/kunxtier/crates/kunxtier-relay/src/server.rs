@@ -5,6 +5,7 @@
 //!
 //! TLS 由自签证书承担, 客户端以指纹固定校验 (见 kunxtier-core::tls)。
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -20,13 +21,15 @@ use kunxtier_core::address;
 use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::{
     ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest, IssueTokenResponse,
-    NetworkInfo, NodeInfo, RegisterRequest, RegisterResponse, RemoveNodeRequest,
-    SetNodePolicyRequest, SignalRelay, SignalServerMsg,
+    LoginRequest, LoginResponse, NetworkInfo, NodeInfo, PeerPathReport, RegisterRequest,
+    RegisterResponse, RelayInfo, RemoveNodeRequest, SetNodePolicyRequest, SignalRelay,
+    SignalServerMsg,
 };
 
 use crate::forward::ForwardRegistry;
 use crate::ratelimit::RateLimiter;
 use crate::satellite::SatelliteRegistry;
+use crate::session::{SessionTable, SESSION_TTL};
 use crate::signaling::{self, OnlineRegistry};
 use crate::store::Store;
 use crate::{cert, Error};
@@ -37,6 +40,8 @@ pub struct AppState {
     register_limiter: RateLimiter,
     /// admin 认证失败计数: 20 次 / 分钟 / 源。
     admin_limiter: RateLimiter,
+    /// 控制台 admin 会话 (登录签发, 内存态)。
+    pub(crate) sessions: SessionTable,
     /// 信令 / 转发 / 卫星 WS 建连限速 (成功也计数): 20 次 / 分钟 / 源 (NFR-9)。
     pub(crate) ws_limiter: RateLimiter,
     /// 在线节点注册表 (信令会话持有, admin 列表合并在线态)。
@@ -57,6 +62,7 @@ impl AppState {
             store: Mutex::new(store),
             register_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             admin_limiter: RateLimiter::new(20, Duration::from_secs(60)),
+            sessions: SessionTable::new(SESSION_TTL),
             ws_limiter: RateLimiter::new(20, Duration::from_secs(60)),
             online: OnlineRegistry::new(),
             forward: ForwardRegistry::new(),
@@ -155,6 +161,8 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 #[derive(Debug, Deserialize)]
 struct NodesQuery {
     network: Option<String>,
+    /// 属主过滤 (FR-3: 按属主查看)。
+    owner: Option<String>,
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -169,12 +177,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/users/disable", post(disable_user))
         .route("/api/admin/tokens", post(issue_token))
         .route("/api/admin/tokens/{id}/revoke", post(revoke_token))
+        .route("/api/admin/login", post(login))
+        .route("/api/admin/logout", post(logout))
+        .route("/api/admin/relays", get(list_relays))
         .route("/api/admin/nodes", get(list_nodes))
         .route("/api/admin/nodes/remove", post(remove_node))
         .route("/api/admin/nodes/policy", post(set_node_policy))
         .route("/ws/signal", get(crate::signaling::ws_handler))
         .route("/ws/relay", get(crate::forward::core_ws_handler))
         .route("/ws/satellite", get(crate::satellite::ws_handler))
+        // 控制台托管: 页面路径回落嵌入页, /api 与 /ws 未匹配保持 404
+        .fallback_service(get(crate::console::spa_fallback))
         .with_state(state)
 }
 
@@ -183,8 +196,9 @@ fn require_admin(state: &AppState, ip: IpAddr, headers: &HeaderMap) -> ApiResult
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
+    // 双轨: 控制台会话令牌 (内存校验优先) 或 admin 凭证 (CLI 沿用)
     let ok = bearer
-        .map(|t| state.lock_store().verify_admin(t))
+        .map(|t| state.sessions.verify(t) || state.lock_store().verify_admin(t))
         .unwrap_or(false);
     if ok {
         return Ok(());
@@ -194,6 +208,77 @@ fn require_admin(state: &AppState, ip: IpAddr, headers: &HeaderMap) -> ApiResult
     }
     tracing::warn!(%ip, "admin 认证失败");
     Err(ApiError::unauthorized())
+}
+
+/// 登录: admin 凭证换会话令牌 (FR-6); 失败计数沿用 admin 限速。
+async fn login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<LoginRequest>,
+) -> ApiResult<Json<LoginResponse>> {
+    if !state.lock_store().verify_admin(&req.credential) {
+        if !state.admin_limiter.check(addr.ip()) {
+            return Err(ApiError::too_many());
+        }
+        tracing::warn!(ip = %addr.ip(), "admin 登录失败");
+        return Err(ApiError::unauthorized());
+    }
+    let (token, expires_at) = state.sessions.issue();
+    tracing::info!(ip = %addr.ip(), "admin 登录, 会话签发");
+    Ok(Json(LoginResponse { token, expires_at }))
+}
+
+/// 登出: 吊销当前会话 (幂等; 以 admin 凭证调用时无会话可吊, 同样返回 ok)。
+async fn logout(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    if let Some(token) = bearer_of(&headers) {
+        state.sessions.revoke(token);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn bearer_of(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+}
+
+/// 中继汇总 (FR-5): 在线卫星 + 内置条目, 各带连接节点数。
+/// 卫星计数来自节点路径上报聚合 (每节点每中继计一次);
+/// 内置条目以转发注册表实际在线端点数计。
+async fn list_relays(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<RelayInfo>>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    let usage = state.online.paths_by_relay();
+    let mut relays: Vec<RelayInfo> = state
+        .satellites
+        .list()
+        .into_iter()
+        .map(|r| {
+            let nodes = usage.get(&r.addr).copied().unwrap_or(0);
+            RelayInfo {
+                addr: r.addr,
+                kind: r.kind,
+                fingerprint: r.fingerprint,
+                nodes,
+            }
+        })
+        .collect();
+    relays.push(RelayInfo {
+        addr: state.builtin.addr.clone(),
+        kind: "core".into(),
+        fingerprint: state.builtin.fingerprint.clone(),
+        nodes: state.forward.online_count(),
+    });
+    Ok(Json(relays))
 }
 
 async fn register(
@@ -327,10 +412,38 @@ async fn list_nodes(
     require_admin(&state, addr.ip(), &headers)?;
     let online = state.online.online_by_network();
     let mut nodes = state.lock_store().list_nodes(q.network.as_deref())?;
+    if let Some(owner) = q.owner.as_deref() {
+        nodes.retain(|n| n.owner.as_deref() == Some(owner));
+    }
+    // 候选地址、版本与路径快照来自信令注册表 (仅在线节点有意义), 按网络取一次
+    let mut cand_cache: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut ver_cache: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
+    let mut path_cache: HashMap<String, HashMap<String, Vec<PeerPathReport>>> = HashMap::new();
     for n in &mut nodes {
         n.online = online
             .get(&n.network)
             .is_some_and(|set| set.contains(&n.name));
+        if !n.online {
+            continue;
+        }
+        let cands = cand_cache
+            .entry(n.network.clone())
+            .or_insert_with(|| state.online.online_candidates(&n.network));
+        let versions = ver_cache
+            .entry(n.network.clone())
+            .or_insert_with(|| state.online.online_versions(&n.network));
+        let slot_paths = path_cache
+            .entry(n.network.clone())
+            .or_insert_with(|| state.online.paths_of(&n.network));
+        if let Some(c) = cands.get(&n.name) {
+            n.candidates = c.clone();
+        }
+        if let Some(v) = versions.get(&n.name) {
+            n.version = v.clone();
+        }
+        if let Some(p) = slot_paths.get(&n.name) {
+            n.paths = p.clone();
+        }
     }
     Ok(Json(nodes))
 }

@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-26, ik-advance T15)
+## 当前实际结构 (2026-10-26, ik-advance T11)
 
 ```text
 hub/
@@ -51,9 +51,11 @@ hub/
 │       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig, stun_servers, log_level)
 │       │                         #   + tls (指纹固定 PinVerifier 与 ureq pinning_agent, 卫星 / 节点 / admin CLI 共用)
 │       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit
-│       │                         #   + signaling (信令 WS, 候选广播 / 策略推送) + forward (转发 WS 双准入) + satellite (注册表 + 卫星进程)
+│       │                         #   + signaling (信令 WS, 候选广播 / 策略推送 / 路径上报聚合) + forward (转发 WS 双准入)
+│       │                         #   + satellite (注册表 + 卫星进程) + session (admin 会话) + console (静态托管与本地反代)
+│       │                         #   + assets/console/ (嵌入页占位, T12 构建链输出真实前端产物)
 │       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
-│       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端)
+│       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端) + console (本地控制台)
 │       │                         #   + logging (日志级别与输出目标装配: flag / RUST_LOG / 文件轮转)
 │       └── kunxtier-node/        # 节点数据面: engine + tun + identity + netconf (网段冲突检测)
 │                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (PING/PONG 探测与路径状态机)
@@ -104,5 +106,10 @@ hub/
 - 2026-10-26 (T15 日志装配): log_level 只进 FileConfig 文件层 (进程级关注点), 不进 RelayConfig 运行时类型; 级别优先级 CLI flag > 配置文件 > RUST_LOG > 默认 info, RUST_LOG 透传 EnvFilter 模块过滤语义; daemon 默认 stderr, --log-file 启用后双写 + 10MB 单份 .old 自实现轮转 (不引入轮转库); subscriber 初始化自 main 头部移至解析后装配位, relay 配置文件预读 (log_spec) 与正式加载各一次, 双读无害。
 - 2026-10-26 (T15 事件留痕): EventRing 容量 256, 类型更名 EventRecord (规划名 NodeEvent 与 signal::NodeEvent 撞名); daemon 持环跨会话复用, 事件点与既有 tracing 埋点同位双写 (日志字段结构不变); IPC 增 StatusVerbose, 回传走 snapshot_bounded (56KB 预算) 防 64KB 单行帧越限; 对端失败原因与中继选择过程从环推导, 不另存状态源。已知妥协: 环进程内易失, 重启清零, 历史回看依赖日志文件。
 - 2026-10-26 (T15 relay 侧): 注册被拒 warn 留痕补 FR-4 缺口; NFR-4 脱敏全量审计通过 (无令牌 / 凭证 / 私钥入日志)。
+- 2026-10-26 (T11 资产裁决): 控制台静态资产随消费方走 (relay crate 内 assets/console/), include_str 两跳; 放弃越出 workspace 五级相对路径直取 web/ dist——跨语言交接显式发生在构建链 (T12 的 cargo-make 前端任务将产物输出至 assets/console/), 不发生在源码路径。嵌入是编译期行为, 部署形态单二进制自包含, 与 web/ 的相对位置无运行时关系。
+- 2026-10-26 (T11 会话): 内存会话表 (kxt_ses_ 前缀, TTL 12h, 惰性过期, 多会话并存, 登出幂等), 重启即失效; require_admin 双轨 (会话令牌优先 / admin 凭证兼容), 登录失败沿用 admin 限速。
+- 2026-10-26 (T11 路径上报): SignalClientMsg::PathReport 携带逐对端路径矩阵, relayed 条目以隧道实际拨号地址标识中继 (非中继号, 免列表序漂移误归因); 节点侧转换事件置脏经 probe 节拍冲刷 + 60s 兜底, try_send 满即丢弃待下轮补报; 核心聚合每节点每中继只计一次, 内置条目计数取转发注册表实际连接数 (不经上报)。Hello 增 version——经信令上报而非注册落库, 免 schema 迁移且节点升级重连后实时刷新 (与规划的字面偏差, 已裁决)。
+- 2026-10-26 (T11 console 子命令): 本地明文 HTTP 托管嵌入资源 + admin API 反代 (ureq 指纹固定, spawn_blocking), 浏览器仅连本地, 无 CORS 面; 仅反代 REST, 信令 / 转发 WS 不经本地。ureq 自 relay dev-dep 迁回正式依赖 (本地反代直接使用其类型)。
+- 已知妥协 (T11): server.rs handler 集中约 530 行, 拆分信号未达阈值; 旧核心遇 PathReport 回消息格式非法、客户端忽略, 版本混跑降级可接受。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

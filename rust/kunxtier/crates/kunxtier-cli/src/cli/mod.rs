@@ -4,6 +4,7 @@
 //! Created: 2026-10-21
 
 pub mod admin;
+mod console;
 pub mod error;
 mod node;
 mod relay;
@@ -12,6 +13,7 @@ use clap::{Parser, Subcommand};
 
 use crate::logging::LogSpec;
 pub use admin::AdminCommand;
+pub use console::ConsoleArgs;
 use error::Fail;
 pub use node::{DaemonArgs, DownArgs, StatusArgs, UpArgs};
 pub use relay::RelayCommand;
@@ -41,6 +43,8 @@ pub enum Command {
     Down(DownArgs),
     /// 本机与对端状态 (路径 direct / relay)
     Status(StatusArgs),
+    /// 本地起 Web 控制台 (托管页面并反代核心 admin API)
+    Console(ConsoleArgs),
 }
 
 impl Command {
@@ -67,6 +71,7 @@ impl Command {
             Command::Up(cmd) => cmd.execute(),
             Command::Down(cmd) => cmd.execute(),
             Command::Status(cmd) => cmd.execute(),
+            Command::Console(cmd) => cmd.execute(),
         }
     }
 }

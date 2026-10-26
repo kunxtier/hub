@@ -22,7 +22,9 @@ use base64::Engine;
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
-use kunxtier_core::protocol::{PathPolicy, SignalClientMsg, SignalPeer, SignalServerMsg};
+use kunxtier_core::protocol::{
+    PathPolicy, PeerPathReport, SignalClientMsg, SignalPeer, SignalServerMsg,
+};
 use kunxtier_core::token;
 
 use crate::server::AppState;
@@ -38,6 +40,8 @@ const OUTBOUND_CAPACITY: usize = 64;
 /// 候选地址上报上限 (条数 / 单条字节数), 防内存滥用。
 const MAX_CANDIDATES: usize = 8;
 const MAX_CANDIDATE_LEN: usize = 64;
+/// 单次路径上报条目上限 (个人规模对端数上界)。
+const MAX_PATH_REPORT: usize = 256;
 /// 单条消息大小上限: 信令帧语义上只有小 JSON (默认 64 MiB 远超所需),
 /// 收紧以防已认证端点用超大帧造成内存与解析压力。
 const MAX_MESSAGE_BYTES: usize = 256 * 1024;
@@ -52,6 +56,10 @@ struct Slot {
     /// 代际号: 同名新连接顶替旧连接时递增, 旧会话的收尾只摘除自己这一代。
     gen: u64,
     candidates: Vec<String>,
+    /// 节点版本 (hello 上报, 控制台总览展示)。
+    version: Option<String>,
+    /// 逐对端路径快照 (节点上报, 总览与中继计数数据源)。
+    paths: Vec<PeerPathReport>,
 }
 
 /// 在线节点注册表: 纯内存, 随进程生命周期 (核心重启后节点自动重连, FR-7)。
@@ -84,6 +92,8 @@ impl OnlineRegistry {
                 tx,
                 gen,
                 candidates: Vec::new(),
+                version: None,
+                paths: Vec::new(),
             },
         ) {
             let _ = old.tx.try_send(SignalServerMsg::Closed {
@@ -106,6 +116,64 @@ impl OnlineRegistry {
     }
 
     /// 更新候选地址 (仅当前代际生效)。
+    /// 记录节点版本 (hello 携带; 代际校验同 set_candidates)。
+    pub fn set_version(&self, key: &NodeKey, gen: u64, version: String) {
+        let mut map = self.lock();
+        if let Some(slot) = map.get_mut(key) {
+            if slot.gen == gen {
+                slot.version = Some(version);
+            }
+        }
+    }
+
+    /// 每网络的在线节点版本 (总览展示用)。
+    pub fn online_versions(&self, network: &str) -> HashMap<String, Option<String>> {
+        self.lock()
+            .iter()
+            .filter(|(k, _)| k.0 == network)
+            .map(|(k, s)| (k.1.clone(), s.version.clone()))
+            .collect()
+    }
+
+    /// 记录路径快照 (代际校验同 set_candidates)。
+    pub fn set_paths(&self, key: &NodeKey, gen: u64, paths: Vec<PeerPathReport>) {
+        let mut map = self.lock();
+        if let Some(slot) = map.get_mut(key) {
+            if slot.gen == gen {
+                slot.paths = paths;
+            }
+        }
+    }
+
+    /// 每网络的节点路径快照 (总览展示用)。
+    pub fn paths_of(&self, network: &str) -> HashMap<String, Vec<PeerPathReport>> {
+        self.lock()
+            .iter()
+            .filter(|(k, _)| k.0 == network)
+            .map(|(k, s)| (k.1.clone(), s.paths.clone()))
+            .collect()
+    }
+
+    /// 每中继连接节点数: 按节点上报的中继地址聚合, 每节点对每中继只计一次
+    /// (内置条目以转发注册表实际连接数为准, 不从此处取)。
+    pub fn paths_by_relay(&self) -> HashMap<String, usize> {
+        let mut usage: HashMap<String, usize> = HashMap::new();
+        for slot in self.lock().values() {
+            let mut counted: Vec<&str> = Vec::new();
+            for path in &slot.paths {
+                if let Some(addr) = path.relay.as_deref() {
+                    if counted.iter().all(|a| *a != addr) {
+                        counted.push(addr);
+                    }
+                }
+            }
+            for addr in counted {
+                *usage.entry(addr.to_string()).or_default() += 1;
+            }
+        }
+        usage
+    }
+
     pub fn set_candidates(&self, key: &NodeKey, gen: u64, candidates: Vec<String>) {
         let mut map = self.lock();
         if let Some(slot) = map.get_mut(key) {
@@ -206,6 +274,8 @@ pub(crate) struct Authenticated {
     pub(crate) network: String,
     pub(crate) name: String,
     pub(crate) ip: String,
+    /// 节点版本 (hello 上报, 可选)。
+    pub(crate) version: Option<String>,
 }
 
 /// 信令会话: 认证 (限时) → 登记 → 初始化推送 → 事件循环 → 收尾。
@@ -222,6 +292,9 @@ async fn session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketAddr) 
     let key: NodeKey = (auth.network.clone(), auth.name.clone());
     let (tx, mut rx) = mpsc::channel::<SignalServerMsg>(OUTBOUND_CAPACITY);
     let gen = state.online.register(key.clone(), tx);
+    if let Some(version) = auth.version.clone() {
+        state.online.set_version(&key, gen, version);
+    }
     // 认证全程无凭证明文经手, 日志仅记身份 (NFR-4)
     tracing::info!(network = %key.0, node = %key.1, %peer, "信令通道建立");
 
@@ -297,7 +370,12 @@ pub(crate) async fn authenticate(
     let deadline = tokio::time::Instant::now() + AUTH_TIMEOUT;
 
     let first = parse_frame(&next_text(socket, deadline).await?)?;
-    let SignalClientMsg::Hello { network, name } = first else {
+    let SignalClientMsg::Hello {
+        network,
+        name,
+        version,
+    } = first
+    else {
         return Err("首条消息必须是 hello".into());
     };
     let auth = {
@@ -351,6 +429,7 @@ pub(crate) async fn authenticate(
         network,
         name,
         ip: auth.ip,
+        version,
     })
 }
 
@@ -478,6 +557,19 @@ async fn handle_client_msg(
                         );
                     }
                 }
+            }
+        }
+        SignalClientMsg::PathReport { paths } => {
+            if paths.len() > MAX_PATH_REPORT || paths.iter().any(|p| p.peer.len() > 32) {
+                send_soft(
+                    sender,
+                    &SignalServerMsg::Error {
+                        message: "路径上报数量或节点名超限".into(),
+                    },
+                )
+                .await;
+            } else {
+                state.online.set_paths(key, gen, paths);
             }
         }
         SignalClientMsg::Signal { to, payload } => {
@@ -648,6 +740,57 @@ mod tests {
         reg.broadcast("default", SignalServerMsg::Pong, None);
         assert!(matches!(rx1.try_recv(), Ok(SignalServerMsg::Pong)));
         assert!(rx2.try_recv().is_err());
+    }
+
+    #[test]
+    fn paths_by_relay_counts_each_node_once_per_relay() {
+        let reg = OnlineRegistry::new();
+        let mk = |net: &str, name: &str| (net.to_string(), name.to_string());
+        let (tx1, _rx1) = mpsc::channel(1);
+        let (tx2, _rx2) = mpsc::channel(1);
+        let g1 = reg.register(mk("default", "n1"), tx1);
+        let g2 = reg.register(mk("default", "n2"), tx2);
+        let sat = "9.9.9.9:443".to_string();
+        reg.set_paths(
+            &mk("default", "n1"),
+            g1,
+            vec![
+                PeerPathReport {
+                    peer: "a".into(),
+                    path: "relayed".into(),
+                    relay: Some(sat.clone()),
+                },
+                PeerPathReport {
+                    peer: "b".into(),
+                    path: "relayed".into(),
+                    relay: Some(sat.clone()),
+                },
+                PeerPathReport {
+                    peer: "c".into(),
+                    path: "direct".into(),
+                    relay: None,
+                },
+            ],
+        );
+        reg.set_paths(
+            &mk("default", "n2"),
+            g2,
+            vec![PeerPathReport {
+                peer: "a".into(),
+                path: "relayed".into(),
+                relay: Some(sat.clone()),
+            }],
+        );
+        // 同节点多条 relayed 只计一次; 不同节点分别累计
+        let usage = reg.paths_by_relay();
+        assert_eq!(usage.get(&sat), Some(&2), "每节点每中继只计一次: {usage:?}");
+        // 网络隔离: paths_of 只见本网
+        let of = reg.paths_of("default");
+        assert_eq!(of["n1"].len(), 3);
+        assert!(reg.paths_of("other").is_empty());
+        // 代际失配的旧会话上报被忽略
+        reg.set_paths(&mk("default", "n1"), g1 + 100, Vec::new());
+        assert_eq!(reg.paths_of("default")["n1"].len(), 3);
     }
 
     #[test]

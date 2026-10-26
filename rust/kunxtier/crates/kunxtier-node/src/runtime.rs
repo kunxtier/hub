@@ -19,7 +19,7 @@ use gotatun::tun::{IpRecv, IpSend};
 use gotatun::x25519::PublicKey;
 use tokio::sync::{mpsc, watch};
 
-use kunxtier_core::protocol::{PathPolicy, SignalPeer, SignalRelay};
+use kunxtier_core::protocol::{PathPolicy, PeerPathReport, SignalPeer, SignalRelay};
 
 use crate::engine::{build_engine_split, EngineOptions, PeerSpec, WgEngine};
 use crate::error::{Error, Result};
@@ -44,6 +44,8 @@ const MAX_RELAYS: usize = 254;
 /// 中继建连时限: 拨号发生在主事件循环内, 必须有界,
 /// 黑洞地址 (不回 RST) 才不会拖垮打洞节拍与信令事件。
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// 路径上报周期兜底: 转换事件即时上报之外的全量校准节拍。
+const PATH_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 路径管理节奏 (T08)。生产默认值面向个人规模; 集成测试以小值驱动状态机。
 #[derive(Debug, Clone)]
@@ -227,6 +229,7 @@ where
         tunnels: HashMap::new(),
         status,
         events,
+        paths_dirty: false,
         done: done_tx,
     };
     tokio::spawn(runtime.run(probe, stun, activity, cancel_rx));
@@ -253,6 +256,8 @@ where
     status: Arc<Mutex<NodeStatus>>,
     /// 关键事件留痕环 (与 handle 共享同一实例)。
     events: Arc<EventRing>,
+    /// 路径自上次上报后已有变化 (转换事件置位, 节拍冲刷)。
+    paths_dirty: bool,
     /// 退出原因通知 (handle.done 的发送端)。
     done: watch::Sender<Option<String>>,
 }
@@ -284,6 +289,8 @@ where
         probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ensure_tick = tokio::time::interval(RELAY_ENSURE_INTERVAL);
         ensure_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut report_tick = tokio::time::interval(PATH_REPORT_INTERVAL);
+        report_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let reason: String = loop {
             tokio::select! {
@@ -318,6 +325,7 @@ where
                     }
                 }
                 _ = probe_tick.tick() => self.on_probe_tick().await,
+                _ = report_tick.tick() => self.send_path_report(),
                 _ = ensure_tick.tick() => {
                     if let Err(e) = self.ensure_relays(&relay_down_tx).await {
                         tracing::warn!(error = %e, "中继通道对齐未完成");
@@ -472,9 +480,11 @@ where
             .unwrap_or(PathPolicy::Auto)
     }
 
-    /// 关键事件留痕: 与既有 tracing 埋点同位双写 (日志字段结构不变, 环供排障视图)。
-    fn note(&self, kind: EventKind, peer: Option<&str>, detail: impl Into<String>) {
+    /// 关键事件留痕: 与既有 tracing 埋点同位双写 (日志字段结构不变, 环供排障视图);
+    /// 顺带标记路径待上报 (事件点即路径转换点)。
+    fn note(&mut self, kind: EventKind, peer: Option<&str>, detail: impl Into<String>) {
         self.events.push(kind, peer, detail);
+        self.paths_dirty = true;
     }
 
     /// 策略切换: 强制中继取消打洞并全量回落; 恢复自动时对在线节点重启打洞。
@@ -675,7 +685,46 @@ where
         for (name, fallback) in actions.retries {
             self.begin_punch(&name, fallback);
         }
+        // 转换事件即时上报 (事件点经 note 置脏; 未变化不重发)
+        if self.paths_dirty {
+            self.paths_dirty = false;
+            self.send_path_report();
+        }
         self.refresh_status();
+    }
+
+    /// 发送逐对端路径快照。
+    /// try_send 理由: 命令通道打满时丢弃本帧, 下一转换或周期兜底自然补报。
+    fn send_path_report(&self) {
+        let _ = self
+            .client
+            .cmd
+            .try_send(SignalCmd::ReportPaths(self.path_report()));
+    }
+
+    /// 逐对端路径快照 (idle / punching / direct / relayed, relayed 附中继地址)。
+    fn path_report(&self) -> Vec<PeerPathReport> {
+        self.peers
+            .iter()
+            .map(|(name, entry)| {
+                let (path, relay) = match &entry.state {
+                    PunchState::Idle => ("idle", None),
+                    PunchState::Punching { .. } => ("punching", None),
+                    PunchState::Direct { .. } => ("direct", None),
+                    PunchState::Relayed { endpoint, .. } => (
+                        "relayed",
+                        PathHub::split_pseudo(*endpoint).and_then(|(id, _)| {
+                            self.tunnels.get(&id).map(|t| t.endpoint.addr.clone())
+                        }),
+                    ),
+                };
+                PeerPathReport {
+                    peer: name.clone(),
+                    path: path.into(),
+                    relay,
+                }
+            })
+            .collect()
     }
 
     /// 扫描路径状态, 收集推进到当前时刻应执行的动作 (纯状态推进, 无 IO;

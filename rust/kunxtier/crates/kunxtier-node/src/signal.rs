@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use kunxtier_core::protocol::{
-    PathPolicy, SignalClientMsg, SignalPeer, SignalRelay, SignalServerMsg,
+    PathPolicy, PeerPathReport, SignalClientMsg, SignalPeer, SignalRelay, SignalServerMsg,
 };
 use kunxtier_core::token;
 
@@ -77,6 +77,8 @@ pub enum SignalCmd {
     Announce(Vec<String>),
     /// 应用层心跳。
     Ping,
+    /// 上报逐对端路径快照 (控制台总览与中继计数数据源)。
+    ReportPaths(Vec<PeerPathReport>),
 }
 
 /// 运行中的信令会话句柄。
@@ -183,6 +185,14 @@ async fn run_session(
                             break "发送失败".into();
                         }
                     }
+                    Some(SignalCmd::ReportPaths(paths)) => {
+                        if send_client(&mut sink, &SignalClientMsg::PathReport { paths })
+                            .await
+                            .is_err()
+                        {
+                            break "发送失败".into();
+                        }
+                    }
                     None => break "命令通道关闭".into(),
                 }
             }
@@ -233,6 +243,7 @@ async fn authenticate(ws: &mut TlsWs, options: &SignalOptions) -> Result<()> {
         &SignalClientMsg::Hello {
             network: options.network.clone(),
             name: options.name.clone(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
     )
     .await?;

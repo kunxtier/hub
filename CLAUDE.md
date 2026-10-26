@@ -8,7 +8,7 @@
   - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置 / TLS 指纹固定
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
   - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时 + daemon 会话与本地 IPC / state 持久化 / 关键事件留痕与 status --verbose; 进度见 issue FEAT-kunxtier-core-runtime)
-  - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / daemon / up / down / status)
+  - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / console / daemon / up / down / status)
   - web/kunxtier-console (控制台前端) 按阶段推进再落地
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
 
@@ -27,6 +27,9 @@ KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地�
 kunxtier daemon &   # 前台守护进程; 另一终端执行:
 kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹>
 kunxtier status && kunxtier down
+
+# 本地 Web 控制台 (托管页面并反代核心 admin API; 核心中继亦直接托管同一页面)
+kunxtier console --relay <核心地址> --fingerprint <核心指纹>
 
 # 任务编排 (cargo-make, rust/kunxtier/Makefile.toml, 按领域划分)
 cargo make --list-all-steps   # 查看全部任务

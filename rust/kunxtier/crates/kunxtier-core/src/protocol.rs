@@ -91,6 +91,37 @@ pub struct NodeInfo {
     pub online: bool,
     /// 节点级路径策略 (FR-10)。
     pub policy: PathPolicy,
+    /// 最近上报的候选地址 (仅在线节点有意义, 由信令注册表合并, 不落库)。
+    pub candidates: Vec<String>,
+    /// 节点版本 (hello 上报, 仅在线节点有意义)。
+    pub version: Option<String>,
+    /// 逐对端路径快照 (路径上报合并; 仅在线节点有意义)。
+    pub paths: Vec<PeerPathReport>,
+}
+
+/// admin 登录 (控制台会话, feat-kunxtier-console FR-6)。
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub credential: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LoginResponse {
+    /// 会话令牌 (Bearer, 内存态, 随 relay 重启失效)。
+    pub token: String,
+    /// 过期时间 (unix 秒)。
+    pub expires_at: i64,
+}
+
+/// 中继汇总条目 (FR-5): 在线卫星与核心内置, 每中继连接节点数来自路径上报聚合。
+#[derive(Debug, Serialize)]
+pub struct RelayInfo {
+    pub addr: String,
+    /// "core" | "satellite"。
+    pub kind: String,
+    pub fingerprint: String,
+    /// 当前经该中继转发的节点数。
+    pub nodes: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,18 +193,36 @@ pub struct SignalRelay {
     pub fingerprint: String,
 }
 
+/// 路径上报条目 (节点 → 核心信令, T11): 对端与当前路径快照。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerPathReport {
+    pub peer: String,
+    /// idle / punching / direct / relayed (与 status 词汇一致)。
+    pub path: String,
+    /// 走中继时上报中继地址 (与中继列表条目 addr 一致); 其余路径为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+}
+
 /// 客户端 → 服务端信令消息: JSON 文本帧, type 标签分派。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalClientMsg {
-    /// 认证第一步: 声明节点身份。
-    Hello { network: String, name: String },
+    /// 认证第一步: 声明节点身份 (version 为节点二进制版本, 控制台总览展示)。
+    Hello {
+        network: String,
+        name: String,
+        #[serde(default)]
+        version: Option<String>,
+    },
     /// 挑战应答: base64(std) 的 sha256(nonce || sha256(节点凭证))。
     Auth { digest: String },
     /// 应用层心跳。
     Ping,
     /// 上报本机候选地址。
     Announce { candidates: Vec<String> },
+    /// 上报逐对端路径快照 (控制台总览与中继计数的数据源)。
+    PathReport { paths: Vec<PeerPathReport> },
     /// 打洞信令: 定向转发给同网在线节点, payload 对服务端不透明。
     Signal {
         to: String,

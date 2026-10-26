@@ -267,6 +267,7 @@ async fn admit(ws: &mut WsStream, kind: &str, identity: &RelayIdentity) -> Resul
                 SignalClientMsg::Hello {
                     network: identity.network.clone(),
                     name: identity.name.clone(),
+                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 },
             )
             .await?;

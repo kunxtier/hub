@@ -41,7 +41,7 @@ tasks:
     owner: "QA"
   - id: "T11"
     title: "控制台后端: admin API 扩展 (策略/中继)、会话、静态资源嵌入 (自签+可选 ACME)"
-    status: "todo"
+    status: "done"
     owner: "SRV"
   - id: "T12"
     title: "Web 控制台前端: 网络切换/总览/节点/令牌/策略/中继页面 (web/kunxtier-console, relay 托管与 console 子命令共用)"

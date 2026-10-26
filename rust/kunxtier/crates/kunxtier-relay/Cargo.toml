@@ -20,8 +20,8 @@ base64.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
+# 本地控制台反代 (console::proxy_api 的指纹固定通道; 测试侧管理 API 调用同源)
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# 测试侧管理 API 调用 (指纹 agent 已移驻 kunxtier-core::tls)
-ureq.workspace = true

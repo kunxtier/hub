@@ -254,6 +254,49 @@ async fn wait_path(node: &Node, want: &str, timeout: Duration) -> NodeStatus {
 }
 
 /// 注入一笔载荷并断言对端观察到 (源虚拟 IP 校验)。
+/// 等待核心 admin 视图呈现指定节点的对端路径 (T11 路径上报经信令异步到达)。
+async fn wait_admin_path(
+    ctx: &Ctx,
+    node: &str,
+    peer: &str,
+    want: &str,
+    want_relay: Option<&str>,
+    timeout: Duration,
+) {
+    let auth = format!("Bearer {}", ctx.admin);
+    let url = format!("{}/api/admin/nodes", ctx.base);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let found = ctx
+            .agent
+            .get(&url)
+            .set("Authorization", &auth)
+            .call()
+            .ok()
+            .and_then(|r| r.into_json::<serde_json::Value>().ok())
+            .and_then(|nodes| nodes.as_array().cloned())
+            .and_then(|nodes| nodes.into_iter().find(|n| n["name"] == node));
+        if let Some(n) = found {
+            if let Some(paths) = n["paths"].as_array() {
+                if let Some(p) = paths
+                    .iter()
+                    .find(|p| p["peer"] == peer && p["path"] == want)
+                {
+                    match want_relay {
+                        Some(relay) if p["relay"] != relay => {}
+                        _ => return,
+                    }
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等待 admin 路径视图 {node}->{peer}={want} (relay={want_relay:?}) 超时"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn exchange(a: &Node, b: &mut Node, tag: &[u8]) {
     let dst: Ipv4Addr = b.handle.status().own_ip.expect("B 应已就绪");
     a.inject
@@ -300,6 +343,10 @@ async fn punch_direct_force_relay_and_recover() {
         "直连端点应为对端真实 UDP 地址: {endpoint}"
     );
     wait_path(&node_b, "direct", Duration::from_secs(15)).await;
+
+    // T11: 路径上报到达核心, admin 总览可见直连 (FR-1)
+    wait_admin_path(&ctx, "na", "nb", "direct", None, Duration::from_secs(15)).await;
+    wait_admin_path(&ctx, "nb", "na", "direct", None, Duration::from_secs(15)).await;
 
     exchange(&node_a, &mut node_b, b"punch-direct-a-to-b").await;
     exchange(&node_b, &mut node_a, b"punch-direct-b-to-a").await;
@@ -357,6 +404,27 @@ async fn unreachable_candidates_fall_back_to_relay() {
         "回落端点应为伪端点: {pseudo}"
     );
     wait_path(&node_b, "relayed", Duration::from_secs(20)).await;
+
+    // T11: 回落路径上报核心, admin 可见中继归属 (内置条目即核心地址)
+    let core_addr = ctx.addr.to_string();
+    wait_admin_path(
+        &ctx,
+        "na",
+        "nb",
+        "relayed",
+        Some(&core_addr),
+        Duration::from_secs(15),
+    )
+    .await;
+    wait_admin_path(
+        &ctx,
+        "nb",
+        "na",
+        "relayed",
+        Some(&core_addr),
+        Duration::from_secs(15),
+    )
+    .await;
 
     // 中继路径互通: 上行帧 [目的][源][密文] 经核心内置转发投递
     exchange(&node_a, &mut node_b, b"fallback-relay-a-to-b").await;

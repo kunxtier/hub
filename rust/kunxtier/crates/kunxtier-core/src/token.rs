@@ -17,6 +17,8 @@ pub enum Kind {
     NodeToken,
     NodeCredential,
     RelayToken,
+    /// 控制台 admin 会话 (内存态, 不入库)。
+    Session,
 }
 
 impl Kind {
@@ -26,6 +28,7 @@ impl Kind {
             Kind::NodeToken => "kxt_node_",
             Kind::NodeCredential => "kxt_nid_",
             Kind::RelayToken => "kxt_relay_",
+            Kind::Session => "kxt_ses_",
         }
     }
 }

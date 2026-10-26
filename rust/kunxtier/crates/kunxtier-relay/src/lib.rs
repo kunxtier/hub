@@ -12,12 +12,14 @@
 //! kunxtier-core::tls, 节点注册客户端与 admin CLI 直接复用。)
 
 pub mod cert;
+pub mod console;
 pub mod error;
 pub mod forward;
 pub mod init;
 pub mod ratelimit;
 pub mod satellite;
 pub mod server;
+pub mod session;
 pub mod signaling;
 pub mod store;
 
