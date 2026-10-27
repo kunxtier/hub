@@ -9,39 +9,126 @@
 
 use std::io::Read;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get};
 use axum::Router;
+use include_dir::{include_dir, Dir};
 
 use kunxtier_core::protocol::ApiErrorBody;
 
 use crate::Error;
 
-/// 控制台页面 (构建产物嵌入; 当前为占位页)。
-/// 资产随消费方走: T12 前端构建任务 (cargo-make) 将 web/kunxtier-console
-/// 的构建产物输出覆盖至 assets/console/, 跨语言交接发生在构建链而非源码路径。
-pub const INDEX_HTML: &str = include_str!("../assets/console/index.html");
+/// 控制台构建产物 (未执行 console-build 时仅含随 git 的占位页 placeholder.html)。
+/// 资产随消费方走: cargo make console-build 将 web/kunxtier-console 的构建
+/// 产物输出覆盖至 assets/console/, 跨语言交接发生在构建链而非源码路径;
+/// 以文件表嵌入, 前端分包与命名策略不反向约束本侧。
+static CONSOLE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/console");
 
-/// SPA fallback: 页面路径回落 index.html; 管理 API / WS 未匹配路径保持 404 JSON。
-pub async fn spa_fallback(uri: Uri) -> Response {
-    let path = uri.path();
-    if path.starts_with("/api") || path.starts_with("/ws") {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorBody {
-                error: "not_found".into(),
-                message: format!("路径不存在: {path}"),
-            }),
-        )
-            .into_response();
+/// 按扩展名定 Content-Type; 未识别类型按 octet-stream 兜底。
+fn mime_of(rel: &str) -> &'static str {
+    match rel.rsplit('.').next().unwrap_or_default() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "json" | "map" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "wasm" => "application/wasm",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
     }
-    Html(INDEX_HTML).into_response()
+}
+
+/// 缓存策略: 构建器哈希产物集中在 assets/ 且内容寻址, 可长缓存;
+/// 其余 (入口页与占位资源) 无 hash, 以 no-cache 随二进制版本刷新。
+fn cache_of(rel: &str) -> &'static str {
+    if rel.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
+/// 控制台路径解析结果 (纯函数, 供单测直接驱动)。
+/// rel 与 contents 均为静态嵌入数据的借用, 不产生分配。
+enum ConsoleRoute {
+    Asset {
+        rel: &'static Path,
+        contents: &'static [u8],
+    },
+    NotFound,
+}
+
+/// 解析控制台路径: 先按路径取嵌入文件; 无扩展名的未命中视为页面路径,
+/// 回落入口页交给前端路由; 带扩展名的未命中资源明确 404;
+/// 管理 API / WS 前缀不回落, 保持 404 JSON。
+fn resolve(path: &str) -> ConsoleRoute {
+    if path.starts_with("/api") || path.starts_with("/ws") {
+        return ConsoleRoute::NotFound;
+    }
+    let rel = path.trim_start_matches('/');
+    if !rel.is_empty() {
+        if let Some(file) = CONSOLE_DIR.get_file(rel) {
+            return ConsoleRoute::Asset {
+                rel: file.path(),
+                contents: file.contents(),
+            };
+        }
+    }
+    let last = rel.rsplit('/').next().unwrap_or_default();
+    if last.contains('.') {
+        return ConsoleRoute::NotFound;
+    }
+    // 页面路径回落入口页; 未构建状态 (fresh clone) 回落占位页
+    match CONSOLE_DIR
+        .get_file("index.html")
+        .or_else(|| CONSOLE_DIR.get_file("placeholder.html"))
+    {
+        Some(file) => ConsoleRoute::Asset {
+            rel: file.path(),
+            contents: file.contents(),
+        },
+        None => ConsoleRoute::NotFound,
+    }
+}
+
+fn asset_response(rel: &Path, contents: &'static [u8]) -> Response {
+    // 嵌入产物路径均产自构建链, 非 UTF-8 时按无扩展名兜底即可
+    let rel = rel.to_str().unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, mime_of(rel)), (CACHE_CONTROL, cache_of(rel))],
+        Bytes::from_static(contents),
+    )
+        .into_response()
+}
+
+fn not_found(path: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiErrorBody {
+            error: "not_found".into(),
+            message: format!("路径不存在: {path}"),
+        }),
+    )
+        .into_response()
+}
+
+/// 控制台静态托管入口 (核心 fallback 与本地 console 子命令共用)。
+pub async fn serve_console(uri: Uri) -> Response {
+    match resolve(uri.path()) {
+        ConsoleRoute::Asset { rel, contents } => asset_response(rel, contents),
+        ConsoleRoute::NotFound => not_found(uri.path()),
+    }
 }
 
 /// 本地控制台装配参数。
@@ -62,7 +149,7 @@ pub async fn start_local(
     let core = options.core;
     let app = Router::new()
         .route("/api/{*path}", any(proxy_api))
-        .fallback_service(get(spa_fallback))
+        .fallback_service(get(serve_console))
         .with_state((agent, core));
     let listener = std::net::TcpListener::bind(options.listen)
         .map_err(|e| Error::Serve(format!("本地控制台监听失败: {e}")))?;
@@ -149,4 +236,59 @@ fn ureq_to_response(resp: ureq::Response) -> Response {
         .map(|_| buf)
         .unwrap_or_default();
     (status, [(CONTENT_TYPE, content_type)], body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel_of(path: &str) -> Option<&'static str> {
+        match resolve(path) {
+            ConsoleRoute::Asset { rel, .. } => rel.to_str(),
+            ConsoleRoute::NotFound => None,
+        }
+    }
+
+    #[test]
+    fn mime_按扩展名判定() {
+        assert_eq!(mime_of("index.html"), "text/html; charset=utf-8");
+        assert_eq!(
+            mime_of("assets/app-B1b2.js"),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_of("assets/app.css"), "text/css; charset=utf-8");
+        assert_eq!(mime_of("assets/logo.svg"), "image/svg+xml");
+        assert_eq!(mime_of("assets/app.wasm"), "application/wasm");
+        assert_eq!(mime_of("assets/data.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn 缓存策略_哈希产物长缓存_入口页不缓存() {
+        assert_eq!(
+            cache_of("assets/app-B1b2.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(cache_of("index.html"), "no-cache");
+    }
+
+    #[test]
+    fn 解析_页面路径回落入口页() {
+        // 入口页随构建状态取 index.html (已构建) 或 placeholder.html (fresh clone),
+        // 断言对两种目录形态都成立, 不依赖本机是否跑过 console-build
+        for path in ["/", "/nodes", "/nodes/a/b"] {
+            let rel = rel_of(path).expect("页面路径应有入口页回落");
+            assert!(
+                rel == "index.html" || rel == "placeholder.html",
+                "意外入口: {rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn 解析_api与ws前缀及缺失资源不回落() {
+        assert_eq!(rel_of("/api/admin/nodes"), None);
+        assert_eq!(rel_of("/ws/signal"), None);
+        assert_eq!(rel_of("/assets/app.missing.js"), None);
+        assert_eq!(rel_of("/favicon.ico"), None);
+    }
 }

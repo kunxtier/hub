@@ -73,6 +73,16 @@ fn node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeInfo> {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        // 运行 / 备份不得隐式建库: 目录缺失时 SQLite 只报难以定位的裸错误,
+        // init 是唯一创建入口 (建目录在先), 此处前置拦截给出指引
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() && !dir.exists() {
+                return Err(Error::Usage(format!(
+                    "数据目录不存在: {}; 请先执行 kunxtier relay --init 初始化",
+                    dir.display()
+                )));
+            }
+        }
         let conn = Connection::open(path)?;
         let store = Store { conn };
         store.migrate()?;
@@ -690,6 +700,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&dir.path().join("state.db")).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn 目录缺失时给出初始化指引而非裸错误() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = match Store::open(&dir.path().join("missing/state.db")) {
+            Err(e) => e,
+            Ok(_) => panic!("目录缺失时应报错"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("数据目录不存在"), "实际: {msg}");
+        assert!(msg.contains("relay --init"), "实际: {msg}");
     }
 
     fn default_network(s: &Store) {

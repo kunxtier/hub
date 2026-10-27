@@ -186,8 +186,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ws/signal", get(crate::signaling::ws_handler))
         .route("/ws/relay", get(crate::forward::core_ws_handler))
         .route("/ws/satellite", get(crate::satellite::ws_handler))
-        // 控制台托管: 页面路径回落嵌入页, /api 与 /ws 未匹配保持 404
-        .fallback_service(get(crate::console::spa_fallback))
+        // 控制台托管: 嵌入资源按路径命中, 页面路径回落入口页;
+        // /api 与 /ws 未匹配保持 404 JSON
+        .fallback_service(get(crate::console::serve_console))
         .with_state(state)
 }
 

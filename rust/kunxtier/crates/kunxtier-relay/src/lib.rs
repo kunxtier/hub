@@ -24,4 +24,4 @@ pub mod signaling;
 pub mod store;
 
 pub use error::{Error, Result};
-pub use init::{init, InitOutput};
+pub use init::{ensure_initialized, init, InitOutput, ADMIN_CREDENTIAL_FILE};

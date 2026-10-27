@@ -9,7 +9,7 @@
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
   - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时 + daemon 会话与本地 IPC / state 持久化 / 关键事件留痕与 status --verbose; 进度见 issue FEAT-kunxtier-core-runtime)
   - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / console / daemon / up / down / status)
-  - web/kunxtier-console (控制台前端) 按阶段推进再落地
+  - web/kunxtier-console (控制台前端): React + TS + Vite + Tailwind + shadcn, pnpm; 产物经 `cargo make console-build` 输出 relay assets/console 嵌入
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
 
 ## 常用命令
@@ -18,8 +18,7 @@
 cd rust/kunxtier
 cargo build
 cargo test
-# 本地试跑 (避免 443 权限问题, 指定高位端口)
-cargo run -p kunxtier-cli --bin kunxtier -- relay --init --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
+# 本地试跑 (避免 443 权限问题, 指定高位端口; 首启自动初始化, admin 凭证写入 state/admin-credential)
 cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
 # 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发)
 KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地址> --fingerprint <核心指纹> --advertise <对外地址>
@@ -36,7 +35,7 @@ cargo make --list-all-steps   # 查看全部任务
 cargo make                    # 缺省: 格式校验 + clippy + 测试
 ```
 
-仓库根 `make hooks` 一次装载 git hooks (pre-commit: 敏感文件与格式检查; commit-msg: conventional 前缀与 emoji 红线), 卸载 `make hooks-uninstall`。
+仓库根 `make hooks` 一次装载 git hooks (pre-commit: 敏感文件与格式检查; commit-msg: conventional 前缀与 emoji 红线), 卸载 `make hooks-uninstall`。仓库根 `make dev` 前后端热更开发 (核心中继热编译 + 控制台 Vite)。
 
 - 运行态目录 `kunxtier-state/` (TLS 私钥与 SQLite) 与 `kunxtier-node-state/` (节点凭证与 WG 私钥) 已进 .gitignore, 严禁提交或外传
 - admin 凭证只走 env `KUNXTIER_ADMIN`, 证书指纹走 `KUNXTIER_FINGERPRINT` 或 `--fingerprint`

@@ -20,6 +20,8 @@ base64.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
+# 控制台静态资源以文件表嵌入 (console 模块)
+include_dir.workspace = true
 # 本地控制台反代 (console::proxy_api 的指纹固定通道; 测试侧管理 API 调用同源)
 ureq.workspace = true
 

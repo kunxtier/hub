@@ -140,7 +140,10 @@ impl RelayCommand {
             println!("初始化完成");
             println!("  状态目录: {}", out.data_dir);
             println!();
-            println!("  admin 凭证 (仅此一次展示, 妥善保存):");
+            println!(
+                "  admin 凭证 (已写入 {}, 首次登录后建议删除):",
+                kunxtier_relay::ADMIN_CREDENTIAL_FILE
+            );
             println!("    {}", out.admin_credential);
             println!();
             println!("  服务端证书指纹 (客户端固定使用):");
@@ -152,6 +155,21 @@ impl RelayCommand {
                 out.fingerprint
             );
             return Ok(());
+        }
+
+        // 未初始化的 state 目录就地进行 init: 免记忆前置命令, 首启即完整可用
+        if let Some(out) = kunxtier_relay::ensure_initialized(&cfg)
+            .map_err(|e| Fail::runtime(format!("自动初始化失败: {e}")))?
+        {
+            eprintln!("数据目录未初始化, 已自动完成初始化");
+            eprintln!(
+                "  admin 凭证 (已写入 {}/{}):",
+                out.data_dir,
+                kunxtier_relay::ADMIN_CREDENTIAL_FILE
+            );
+            eprintln!("    {}", out.admin_credential);
+            eprintln!("  服务端证书指纹 (客户端固定使用):");
+            eprintln!("    {}", out.fingerprint);
         }
 
         // expect 理由: 仅在系统线程资源耗尽时失败, 属环境级故障, 无恢复价值

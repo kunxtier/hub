@@ -45,7 +45,7 @@ tasks:
     owner: "SRV"
   - id: "T12"
     title: "Web 控制台前端: 网络切换/总览/节点/令牌/策略/中继页面 (web/kunxtier-console, relay 托管与 console 子命令共用)"
-    status: "todo"
+    status: "done"
     owner: "FE"
   - id: "T13"
     title: "Windows 平台支持: wintun 接入验证与三平台统一构建产物"

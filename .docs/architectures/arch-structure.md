@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-26, ik-advance T11)
+## 当前实际结构 (2026-10-27, ik-advance T12)
 
 ```text
 hub/
@@ -52,8 +52,8 @@ hub/
 │       │                         #   + tls (指纹固定 PinVerifier 与 ureq pinning_agent, 卫星 / 节点 / admin CLI 共用)
 │       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit
 │       │                         #   + signaling (信令 WS, 候选广播 / 策略推送 / 路径上报聚合) + forward (转发 WS 双准入)
-│       │                         #   + satellite (注册表 + 卫星进程) + session (admin 会话) + console (静态托管与本地反代)
-│       │                         #   + assets/console/ (嵌入页占位, T12 构建链输出真实前端产物)
+│       │                         #   + satellite (注册表 + 卫星进程) + session (admin 会话) + console (include_dir 文件表静态托管与本地反代)
+│       │                         #   + assets/console/ (前端构建产物嵌入; 未构建时为随 git 的占位页)
 │       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
 │       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端) + console (本地控制台)
 │       │                         #   + logging (日志级别与输出目标装配: flag / RUST_LOG / 文件轮转)
@@ -64,7 +64,10 @@ hub/
 │                                 #   + ipc (UDS + JSON 行协议) + daemon (会话生命周期与 IPC 服务端)
 │                                 #   + events (关键事件留痕环, status --verbose 数据源)
 ├── CLAUDE.md                     # 已创建
-└── web/                          # 未建 (控制台前端阶段落地)
+└── web/kunxtier-console/         # 控制台前端 (pnpm + Vite + React + TS + Tailwind v4 + shadcn 风格基件)
+                                  #   src: api (client / types / hooks) + state (AppContext) + components (布局 / 切换器 / ui 基件)
+                                  #   + pages (Login / Overview / Nodes / Tokens / Networks / Relays) + lib (cn / summary)
+                                  #   产物经 cargo make console-build 输出 relay assets/console/ (vite outDir 直出)
 ```
 
 ## 演化决策记录
@@ -111,5 +114,11 @@ hub/
 - 2026-10-26 (T11 路径上报): SignalClientMsg::PathReport 携带逐对端路径矩阵, relayed 条目以隧道实际拨号地址标识中继 (非中继号, 免列表序漂移误归因); 节点侧转换事件置脏经 probe 节拍冲刷 + 60s 兜底, try_send 满即丢弃待下轮补报; 核心聚合每节点每中继只计一次, 内置条目计数取转发注册表实际连接数 (不经上报)。Hello 增 version——经信令上报而非注册落库, 免 schema 迁移且节点升级重连后实时刷新 (与规划的字面偏差, 已裁决)。
 - 2026-10-26 (T11 console 子命令): 本地明文 HTTP 托管嵌入资源 + admin API 反代 (ureq 指纹固定, spawn_blocking), 浏览器仅连本地, 无 CORS 面; 仅反代 REST, 信令 / 转发 WS 不经本地。ureq 自 relay dev-dep 迁回正式依赖 (本地反代直接使用其类型)。
 - 已知妥协 (T11): server.rs handler 集中约 530 行, 拆分信号未达阈值; 旧核心遇 PathReport 回消息格式非法、客户端忽略, 版本混跑降级可接受。
+- 2026-10-27 (T12 前端栈): React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn 风格基件 (Radix select / Slot + cva, 基件随仓库手写维护), oxfmt / oxlint 管格式与静态检查, pnpm 管依赖; 数据层 TanStack Query (3s 轮询, 页签隐藏自动暂停), 路由 react-router; 会话令牌与网络组选择纯内存态 (FR-7), 401 统一事件跳登录。
+- 2026-10-27 (T12 嵌入机制): console 由单文件 include_str 升级为 include_dir 文件表 (路径命中 + 扩展名 MIME + 缓存策略: assets/ 前缀哈希产物 immutable 1y, 入口页 no-cache), 前端分包与命名策略不再反向约束 Rust 侧。两个构建链事实: cargo 不跟踪 include_dir 读入的文件, 资产变更不触发重编译——console-build 任务末尾 touch console.rs 强制重嵌入; vite outDir 相对前端项目根解析, 取 ../../rust/... 直出 assets/console (emptyOutDir)。
+- 2026-10-27 (T12 任务归属): 开发热更命令归宿仓库根 Makefile (make dev / dev-relay / dev-console, 用户裁决, 聚合 rust cargo-make 与 web pnpm); rust/kunxtier/Makefile.toml 只保留构建链任务 (console-build / console-check), 不进缺省流程, Rust 侧开发不依赖 Node 工具链。占位 index.html 随 git 保留, 产物文件 gitignore, fresh clone 无 Node 仍可 cargo build 出占位页。
+- 已知妥协 (T12): admin API 无用户列表端点, 令牌页以文本输入属主 + 就地创建/禁用用户承载 (用户量个人规模, 列表端点后续有需要再补); TypeScript 已随本机升级 7.x (baseUrl 移除), tsconfig 按相对 paths 适配; 浏览器真实交互验证待 e2e (T10) 与人工走查, 本切片验证到 HTTP 行为层。
+- 2026-10-27 (首启自动初始化): relay 运行模式启动前置 ensure_initialized——数据目录未初始化就地进行 init, 免记忆前置命令 (用户反馈 "别人用工具时不会执行 --init"); admin 凭证落 state 目录 admin-credential (0600), 与 TLS 私钥同信任域, 服务化场景输出被 journal 吞掉后可找回; `relay --init` 保留为显式入口, backup 不自动初始化。
+- 2026-10-27 (占位页防误提交修正): 原设计 "git 跟踪 assets/console/index.html + console-build 原地覆盖" 使每次构建后出现已修改的被跟踪文件, 一把 git add 即误提交构建产物 (fresh clone 白屏, 预检两次捕获同一问题)——占位页改为 assets/console/placeholder.html (git 跟踪, vite emptyOutDir 关闭不触碰), 目录产物整体 gitignore 无 negation, 陈旧哈希清理移入 console-build 脚本; console.rs 入口回落链 index.html -> placeholder.html, 单测对两种目录形态均成立。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

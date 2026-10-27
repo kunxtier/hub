@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help verify hooks hooks-uninstall
+.PHONY: help verify hooks hooks-uninstall dev relay-dev console-dev
 
 help: ## 显示可用目标
 	@awk -F':.*## ' '/^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -17,6 +17,9 @@ hooks-uninstall: ## 卸载 git hooks
 	git config --unset core.hooksPath || true
 	@echo "hooks 已卸载"
 
+install: ## 安装依赖 (web)
+	cd web/kunxtier-console && pnpm install
+
 fmt: ## rust 域格式化
 	cd rust/kunxtier && cargo make fmt
 
@@ -28,3 +31,12 @@ test: ## rust 域全量测试
 
 verify: ## 一键检查全部项目 (格式 + 静态检查 + 编译 + 测试; 当前 rust, 新项目追加调用行)
 	cd rust/kunxtier && cargo make verify
+
+# 开发热更: 前置 rust/kunxtier 已 relay-init 且装好 cargo-watch, web/kunxtier-console 已 pnpm install。
+# 浏览器访问 http://127.0.0.1:5173, /api 由 Vite 代理到核心中继 9443。
+
+dev-relay: ## 核心中继热编译重启 (委托 cargo make relay-watch)
+	cd rust/kunxtier && cargo make relay-watch
+
+dev-console: ## 前端 Vite 热更 (/api 代理本地核心中继)
+	cd web/kunxtier-console && pnpm dev

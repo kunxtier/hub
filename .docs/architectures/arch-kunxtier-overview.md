@@ -89,6 +89,16 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 - console 子命令: 本地 HTTP 服务托管同一份嵌入资源并反代 admin API (TLS 指纹固定在反代层), 浏览器仅连接本地进程, 无 CORS 面
 - ACME 本阶段不实现, 配置面预留字段并明确报错
 
+## 控制台前端
+
+前端源码位于 `web/kunxtier-console/`, 单页应用, 能力完全消费控制台后端的 admin API; 构建产物经 cargo-make 任务输出到 relay `assets/console/` 嵌入, 双入口 (核心托管 / console 子命令) 共用同一份产物。
+
+- 技术栈: React + TypeScript + Vite + Tailwind CSS + shadcn/ui (Radix 基件), oxfmt / oxlint 管格式与静态检查, pnpm 管依赖; 数据层 TanStack Query (轮询 / 失效刷新 / 统一 401 处理), 路由 react-router
+- 样式纪律: 遵循仓库 basic-ui 规则——层级用边框 / 字重 / 间距 / 尺寸表达, 颜色只承担语义 (在线 / 离线 / 危险操作), 不做装饰性背景, 不引入主题系统
+- 嵌入机制: relay 侧以 `include_dir` 文件表替代 T11 单文件 include_str 占位, 按路径 + 扩展名 MIME 托管; 前端分包与文件命名策略 (hash / chunk) 不再约束 Rust 侧; 占位文件保留入库, 产物文件进 gitignore, fresh clone 无 Node 工具链仍可 cargo build (出占位页)
+- 构建链: `cargo make console-build` 独立任务 (pnpm install --frozen-lockfile + build + 产物输出), 不进缺省链, 避免每次 cargo make 依赖 Node 工具链; T13 统一构建产物入口再串联; 开发态走 vite dev server 本地代理 relay (自签证书校验在 dev 代理层放行, 属本机开发妥协, 生产形态指纹固定位置不变)
+- 会话与实时性: 会话令牌与所选网络组只存内存 (无本地存储), 刷新即重登; 总览 / 节点 / 中继页 3s 轮询 (页签隐藏暂停), 不为此新开 admin WS 通道
+
 ## 设计原则与约束
 
 - relay 即中枢: 核心中继是唯一管理权威, relay + daemon 即闭环; network 是中继内的一等隔离域, 网络组间不互通不可见; 控制台与卫星中继都是可插拔扩展, 不改变闭环
@@ -122,3 +132,5 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 | daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转, 服务化后 journal 天然接管; 代价是手动后台运行时需显式开文件或自行重定向 |
 | console 浏览器直连核心 API (CORS) vs 本地反代 | 本地反代 | 浏览器仅连本地进程, 自签证书信任与 TLS 指纹固定收口在反代层, 无 CORS 面; 代价是 console 子命令多一层代理实现 |
 | 路径数据: 节点逐对端上报矩阵 vs 聚合计数 | 逐对端矩阵 | 能定位 "谁卡在中继上", 排障价值高 (个人规模数据量小); 代价是信令协议多一类上报消息 |
+| 前端栈 React + shadcn vs Vue / 零构建手写 | React + Tailwind + shadcn (Vite) | 开发者熟悉度优先, shadcn 结构化风格与 basic-ui 兼容; 代价是产物体积大于手写方案 (嵌入二进制可接受) 与构建链首次搭建成本 |
+| 控制台资产嵌入: include_dir 文件表 vs 固定文件名 include_str | include_dir 文件表 | 前端分包 / hash 命名不再反向约束 Rust 侧; 代价是多一个小依赖, 占位文件需随 git 保留 |

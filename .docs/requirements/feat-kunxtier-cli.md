@@ -17,8 +17,8 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 ### 首次部署核心中继
 
 1. 拷贝二进制到目标机器 (通常是节点都可达的一台公网机器, 但这不是架构约束)
-2. `kunxtier relay --init` 生成状态目录、自签证书与 admin 凭证, 并创建默认网络组
-3. `kunxtier relay` 启动, 由 systemd (Linux) / launchd (macOS) 托管; 浏览器打开即得控制台
+2. `kunxtier relay` 启动: 数据目录未初始化时自动完成初始化 (自签证书 / admin 凭证 / 默认网络组), 凭证同时写入 state 目录 `admin-credential` (0600); 也可先显式执行 `kunxtier relay --init`
+3. 由 systemd (Linux) / launchd (macOS) 托管; 浏览器打开即得控制台
 
 ### 扩展卫星中继 (可选)
 
@@ -52,8 +52,8 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 
 ```sh
 # ── 核心中继 (一个网络一个, 部署位置不限, 443/tcp) ─────────────
-kunxtier relay --init                            # 初始化: 状态目录/自签证书/admin 凭证, 并创建默认网络组
-kunxtier relay                                   # 启动核心中继: 管理 + 信令 + 内置转发 + 控制台托管
+kunxtier relay                                   # 启动核心中继: 管理 + 信令 + 内置转发 + 控制台托管; 首启自动初始化 (凭证写入 state/admin-credential)
+kunxtier relay --init                            # (可选) 显式预初始化: 状态目录/自签证书/admin 凭证/默认网络组
 kunxtier relay --config /etc/kunxtier/relay.toml # 指定配置文件 (监听地址/数据目录等长期配置)
 kunxtier relay backup                            # 导出一致性备份 (SQLite 快照, 用于迁移与恢复)
 

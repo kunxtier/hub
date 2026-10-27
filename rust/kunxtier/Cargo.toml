@@ -34,6 +34,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+# 控制台构建产物嵌入 (relay: assets/console 文件表)
+include_dir = "0.7"
 # WG 用户态引擎: gotatun 0.7.2 起 MSRV 1.95 超出当前工具链 (1.90), 升级工具链前锁定 0.7.1。
 # default-features 关闭以排除 aws-lc-rs, ring 后端与 rustls 选型对齐。
 gotatun = { version = "=0.7.1", default-features = false, features = ["ring", "device"] }

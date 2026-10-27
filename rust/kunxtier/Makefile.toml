@@ -97,6 +97,33 @@ script = '''
 cargo run -p kunxtier-cli --bin kunxtier -- relay backup ./backup-$(date +%Y%m%d-%H%M%S).db
 '''
 
+# ---- 控制台 ----
+# 前端源码 web/kunxtier-console (pnpm + Vite); 构建产物经 vite outDir 直接输出
+# relay assets/console/ 嵌入。缺省流程不含本域任务, Rust 侧开发不依赖 Node 工具链。
+
+[tasks.console-build]
+category = "控制台"
+description = "安装前端依赖并构建产物至 relay assets/console (需 Node 与 pnpm)"
+cwd = "../../web/kunxtier-console"
+script = '''
+# 清理陈旧哈希产物 (占位页 placeholder.html 与新产物除外, vite 不清目录)
+find ../../rust/kunxtier/crates/kunxtier-relay/assets/console \
+  -mindepth 1 -maxdepth 1 ! -name placeholder.html -exec rm -rf {} +
+pnpm install --frozen-lockfile
+pnpm build
+# include_dir 读入的资产变更不被 cargo 跟踪, 触碰源文件强制下次编译重新嵌入
+touch ../../rust/kunxtier/crates/kunxtier-relay/src/console.rs
+'''
+
+[tasks.console-check]
+category = "控制台"
+description = "前端静态检查 (oxlint) 与格式校验 (oxfmt)"
+cwd = "../../web/kunxtier-console"
+script = '''
+pnpm lint
+pnpm fmt-check
+'''
+
 # ---- 发布 ----
 # 部署任务待部署形态确定 (systemd / 容器 / 静态二进制分发) 后再补, 不预建空壳
 

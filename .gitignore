@@ -34,3 +34,7 @@ logs/
 kunxtier-state/
 kunxtier-node-state/
 *.db
+
+# kunxtier 控制台前端构建产物 (随 git 保留的占位页 placeholder.html 除外)
+rust/kunxtier/crates/kunxtier-relay/assets/console/*
+!rust/kunxtier/crates/kunxtier-relay/assets/console/placeholder.html
