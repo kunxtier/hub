@@ -73,7 +73,7 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 
 可观测性基线 (需求见 nfr-kunxtier-observability): 分级结构化日志 + status 排障视图, 不引入指标与追踪体系。
 
-- 日志基建: tracing 统一埋点, subscriber 只在 kunxtier-cli main 初始化一次 (四种进程角色共用); 级别优先级遵循全局分层 CLI flag > config (relay 配置文件) > ENV (RUST_LOG) > 默认 info。daemon 默认输出 stderr (服务化后由 systemd / launchd journal 接管), `--log-file` 显式启用文件输出, 启用时 stderr / 文件双写, 文件按大小轮转保留一份历史
+- 日志基建: tracing 统一埋点, subscriber 只在 kunxtier-cli main 初始化一次 (四种进程角色共用); 级别优先级遵循全局分层 CLI flag > config > ENV (RUST_LOG) > 默认 info (daemon 侧 config 层即节点全局配置)。daemon 默认输出 stderr, `--log-file` 显式启用文件输出, 启用时 stderr / 文件双写, 文件按大小轮转保留一份历史; 服务化后由 install 固化 `--log-file` 到平台日志目录 (见 "服务化与全局配置"), Linux 下 stderr 仍旁路进 journald
 - 节点事件环: kunxtier-node 内维护有界 NodeEvent 环形缓冲 (时间戳 / 类别 / peer / detail), 只记打洞、路径切换、信令、注册四类关键事件; 事件产生点同源双写 tracing 与环; 对端最近失败原因与中继选择过程从环推导, 不另存第二份状态源; `status --verbose` 经本地 IPC 拉取事件环与当前路径状态
 - relay 侧: 只补齐事件日志 (节点注册 / 凭证吊销 / 令牌校验失败 / 卫星注册与摘除 / admin 登录失败), 不建事件环
 - 脱敏: 日志字段按 nfr-kunxtier-security NFR-4 审计, 令牌 / 私钥 / 凭证一律脱敏形式
@@ -98,6 +98,18 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 - 嵌入机制: relay 侧以 `include_dir` 文件表替代 T11 单文件 include_str 占位, 按路径 + 扩展名 MIME 托管; 前端分包与文件命名策略 (hash / chunk) 不再约束 Rust 侧; 占位文件保留入库, 产物文件进 gitignore, fresh clone 无 Node 工具链仍可 cargo build (出占位页)
 - 构建链: `cargo make console-build` 独立任务 (pnpm install --frozen-lockfile + build + 产物输出), 不进缺省链, 避免每次 cargo make 依赖 Node 工具链; T13 统一构建产物入口再串联; 开发态走 vite dev server 本地代理 relay (自签证书校验在 dev 代理层放行, 属本机开发妥协, 生产形态指纹固定位置不变)
 - 会话与实时性: 会话令牌与所选网络组只存内存 (无本地存储), 刷新即重登; 总览 / 节点 / 中继页 3s 轮询 (页签隐藏暂停), 不为此新开 admin WS 通道
+
+## 服务化与全局配置
+
+daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-11), 目标是服务与 CLI 对同一份机器级配置和存储位置达成一致, 不依赖调用时的工作目录。
+
+- 全局配置: NodeGlobalConfig 承载机器级配置文件 (Linux /etc/kunxtier/config.toml, macOS /Library/Application Support/kunxtier/config.toml, Windows 随平台切片), 字段 state_dir / log_dir / log_level, 全部非敏感; 落 kunxtier-core, 沿用 FileConfig + resolve 集中合并惯例, 分层 CLI > ENV > CONFIG > DEFAULT, 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 统一读取; relay 的 relay.toml 分层维持独立, 是否并入机器级配置留独立切片评估
+- 目录布局: state 目录由 CWD 相对默认改为平台固定 (macOS /Library/Application Support/kunxtier 与配置同置, Linux /var/lib/kunxtier), 日志统一平台日志目录下应用子目录 (macOS /Library/Logs/kunxtier, Linux /var/log/kunxtier)
+- 服务注册: macOS 为 root LaunchDaemon (/Library/LaunchDaemons/com.kunxtier.daemon.plist, RunAtLoad + KeepAlive, 经 launchctl bootstrap / bootout 管理); Linux 为 systemd 系统单元 (/etc/systemd/system/kunxtier.service, network-online 之后启动, Restart=on-failure); 服务定义只固化二进制绝对路径与 --log-file (install 时按全局配置解析日志位置), state_dir 不进单元, 运行时读全局配置保持单一事实源; Windows 注册随平台切片
+- install / uninstall: install 校验提权 (非 root 报错并给 sudo 提示), 全局配置缺失则以默认值显式生成 (0644), 确保 state / log 目录与权限就绪, 注册并启动, 幂等; uninstall 停服并删除服务定义, state 与全局配置保留
+- 日志归属: 服务形态统一文件日志 <log_dir>/daemon.log (复用既有大小轮转), 修订此前 "journal 接管" 口径; Linux 下 stderr 仍双写进 journald, 作为旁路观测面
+- 停机信号: SIGTERM 与 ctrl-c 同送 shutdown watch, launchd / systemd stop 走有界停机, TUN 清理路径可靠
+- IPC 权限口径: 服务以 root 运行, state 目录 0755 (root), 节点身份与 WG 私钥 0600, IPC socket 显式 0666; 信任边界从 "目录 0700 限当前用户" 修订为 "本机已登录用户即信任域"——up 仍需一次性令牌, 私钥不出 0600 信任域
 
 ## 设计原则与约束
 
@@ -129,7 +141,10 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 | 证书: 默认自签 + CLI 指纹固定, 可选 ACME | 自签优先 | 免域名开箱即用; 浏览器侧自签需首次手动信任, 有域名用户可走 ACME |
 | 打洞成功率 | 不追求 100%, 策略可强制中继 | 对称 NAT 等场景依赖中继, 属设计内行为; 强制中继覆盖出口不稳定场景 |
 | 排障事件: daemon 内存事件环 vs 解析日志文件 | 内存事件环 | status --verbose 免文件解析、内存有界、IPC 直取; 代价是进程重启即清零, 历史回看仍依赖日志文件 |
-| daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转, 服务化后 journal 天然接管; 代价是手动后台运行时需显式开文件或自行重定向 |
+| daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转; 服务化后由 install 固化 `--log-file` 到平台日志目录, journal 退为 Linux 旁路; 代价是手动后台运行时需显式开文件或自行重定向 |
+| 节点存储目录: 平台固定 (全局配置可改) vs CWD 相对默认 | 平台固定 | 服务与 CLI 免传参对齐, 服务拉起不再依赖工作目录; 代价是本地开发需显式 --state-dir |
+| IPC socket 0666 vs 管理组 0660 | 0666 (本机用户信任域) | 服务 root 形态下普通用户可用 up / down / status, 规避跨平台组语义差异; 代价是本机任意用户可断开会话 (up 仍需令牌) |
+| 服务单元固化 --log-file vs 运行时探测服务形态 | install 时固化 | 单元自描述、无形态探测魔法; 代价是改 log_dir 后需重跑 install 再生成单元 |
 | console 浏览器直连核心 API (CORS) vs 本地反代 | 本地反代 | 浏览器仅连本地进程, 自签证书信任与 TLS 指纹固定收口在反代层, 无 CORS 面; 代价是 console 子命令多一层代理实现 |
 | 路径数据: 节点逐对端上报矩阵 vs 聚合计数 | 逐对端矩阵 | 能定位 "谁卡在中继上", 排障价值高 (个人规模数据量小); 代价是信令协议多一类上报消息 |
 | 前端栈 React + shadcn vs Vue / 零构建手写 | React + Tailwind + shadcn (Vite) | 开发者熟悉度优先, shadcn 结构化风格与 basic-ui 兼容; 代价是产物体积大于手写方案 (嵌入二进制可接受) 与构建链首次搭建成本 |

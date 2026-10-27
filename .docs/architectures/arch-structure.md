@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-27, ik-advance T12)
+## 当前实际结构 (2026-10-27, ik-advance T14)
 
 ```text
 hub/
@@ -49,19 +49,21 @@ hub/
 │   ├── Makefile.toml             # cargo-make 任务集 (构建 / 质量 / 测试 / 运行 / 发布)
 │   └── crates/
 │       ├── kunxtier-core/        # 协议 (信令 / 转发帧 / 卫星注册) / 凭证令牌 / 地址 / 分层配置 (含 SatelliteConfig, stun_servers, log_level)
+│       │                         #   + 节点全局配置 (NodeFileConfig / NodeGlobalConfig, 机器级目录与日志级别)
 │       │                         #   + tls (指纹固定 PinVerifier 与 ureq pinning_agent, 卫星 / 节点 / admin CLI 共用)
 │       ├── kunxtier-relay/       # 核心中继: store (schema v2 含 nodes.policy) + server + init + cert + ratelimit
 │       │                         #   + signaling (信令 WS, 候选广播 / 策略推送 / 路径上报聚合) + forward (转发 WS 双准入)
 │       │                         #   + satellite (注册表 + 卫星进程) + session (admin 会话) + console (include_dir 文件表静态托管与本地反代)
 │       │                         #   + assets/console/ (前端构建产物嵌入; 未构建时为随 git 的占位页)
 │       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
-│       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端) + console (本地控制台)
-│       │                         #   + logging (日志级别与输出目标装配: flag / RUST_LOG / 文件轮转)
+│       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端, state 目录走全局配置) + console (本地控制台)
+│       │                         #   + install / uninstall (T14 服务化) + logging (日志级别与输出目标装配: flag / config / RUST_LOG / 文件轮转)
 │       └── kunxtier-node/        # 节点数据面: engine + tun + identity + netconf (网段冲突检测)
 │                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (PING/PONG 探测与路径状态机)
 │                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配, PathTimings 节奏)
-│                                 #   + state (node.json 版本化持久化) + register (一次性令牌注册客户端)
-│                                 #   + ipc (UDS + JSON 行协议) + daemon (会话生命周期与 IPC 服务端)
+│                                 #   + state (node.json 版本化持久化, 目录 0755 / 文件 0600) + register (一次性令牌注册客户端)
+│                                 #   + ipc (UDS + JSON 行协议, socket 0666) + daemon (会话生命周期, IPC 服务端, 停机信号装配)
+│                                 #   + service (T14: launchd / systemd 定义生成与 install / uninstall 计划执行)
 │                                 #   + events (关键事件留痕环, status --verbose 数据源)
 ├── CLAUDE.md                     # 已创建
 └── web/kunxtier-console/         # 控制台前端 (pnpm + Vite + React + TS + Tailwind v4 + shadcn 风格基件)
@@ -120,5 +122,11 @@ hub/
 - 已知妥协 (T12): admin API 无用户列表端点, 令牌页以文本输入属主 + 就地创建/禁用用户承载 (用户量个人规模, 列表端点后续有需要再补); TypeScript 已随本机升级 7.x (baseUrl 移除), tsconfig 按相对 paths 适配; 浏览器真实交互验证待 e2e (T10) 与人工走查, 本切片验证到 HTTP 行为层。
 - 2026-10-27 (首启自动初始化): relay 运行模式启动前置 ensure_initialized——数据目录未初始化就地进行 init, 免记忆前置命令 (用户反馈 "别人用工具时不会执行 --init"); admin 凭证落 state 目录 admin-credential (0600), 与 TLS 私钥同信任域, 服务化场景输出被 journal 吞掉后可找回; `relay --init` 保留为显式入口, backup 不自动初始化。
 - 2026-10-27 (占位页防误提交修正): 原设计 "git 跟踪 assets/console/index.html + console-build 原地覆盖" 使每次构建后出现已修改的被跟踪文件, 一把 git add 即误提交构建产物 (fresh clone 白屏, 预检两次捕获同一问题)——占位页改为 assets/console/placeholder.html (git 跟踪, vite emptyOutDir 关闭不触碰), 目录产物整体 gitignore 无 negation, 陈旧哈希清理移入 console-build 脚本; console.rs 入口回落链 index.html -> placeholder.html, 单测对两种目录形态均成立。
+- 2026-10-27 (T14 全局配置): NodeGlobalConfig 机器级配置 (state_dir / log_dir / log_level, 全非敏感) 落 core::config, 沿 FileConfig + resolve 集中合并惯例; state 目录默认由 CWD 相对切平台固定, daemon / up / down / status / install / uninstall 六方统一读取, 分层 CLI > ENV > CONFIG > DEFAULT (空 env 视同未设置); relay.toml 分层维持独立, 机器级统一留独立切片评估。
+- 2026-10-27 (T14 IPC 口径修订): 信任边界从 "state 目录 0700 限当前用户" 修订为 "本机已登录用户即信任域"——目录 0755 + socket bind 后显式 0666 (umask 收紧不生效), 身份与私钥文件仍 0600, up 仍需令牌; 修订动因是服务化后 daemon 以 root 运行, 原口径下普通用户 up / status 直接被目录权限挡死。
+- 2026-10-27 (T14 服务定义): 计划 / 执行分离 (Step: Mkdir / Write / Remove / Run 序列 + Runner 注入, 单测断言 launchctl / systemctl 调用序列而不真调系统); 服务定义只固化二进制路径与 --log-file, state_dir 不进单元、运行时读全局配置保持单一事实源; install 幂等 (macOS 先 bootout (容忍) 再 bootstrap, Linux enable --now 后 restart 应用新定义); uninstall 停服删定义, state 与全局配置保留。
+- 2026-10-27 (T14 停机信号): spawn_shutdown_signals 为 async fn——SIGTERM 注册完成后再返回; 初版注册在 spawn 任务内异步完成, 测试的 kill 抢在注册前发出走了默认终止 (测试进程被杀的实测教训), 服务场景同理会漏接停服信号。
+- 2026-10-27 (T14 预检修正, 启动期封停): daemon 启动期 state 持久故障 (版本拒读 / 解析失败) 走致命态封停留守而非退出进程——KeepAlive / Restart=on-failure 托管下持久故障退出会形成管理器节流拉起循环 (systemd 有 StartLimit 自弃, launchd 无放弃机制); 目录 / socket 级环境失败仍退出 (IPC 无从服务), 重试由管理器节流兜底。
+- 已知妥协 (T14): systemd 单元与命令序列仅单测断言 (macOS 侧编译), Linux 真机 systemctl 流程随人工验证 issue; launchd 特权冒烟为 #[ignore] 用例, 需 KUNXTIER_SMOKE_BIN 提供真实二进制 (current_exe 是测试进程, 不可注册为服务)。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

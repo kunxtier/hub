@@ -105,6 +105,25 @@ kunxtier (轻量 P2P 虚拟组网, ZeroTier / EasyTier 平替) 规划已完成: 
 
 架构补记见 arch-kunxtier-overview "控制台前端"。
 
+## T14 实施拆解
+
+规划裁决 (2026-10-27 ik-plan):
+
+- 全局配置: 节点侧机器级配置文件 (Linux /etc/kunxtier/config.toml, macOS /Library/Application Support/kunxtier/config.toml, Windows %ProgramData% 随 T13), 字段 state_dir / log_dir / log_level, 全非敏感; NodeGlobalConfig 落 kunxtier-core (沿用 FileConfig + resolve 集中合并惯例), 分层 CLI > ENV > CONFIG > DEFAULT, 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 六方统一读取; relay 不并入 (relay.toml 分层已有测试覆盖, 机器级统一留独立切片)
+- 目录默认: state 目录由 CWD 相对 ./kunxtier-node-state 改为平台固定 (macOS /Library/Application Support/kunxtier 与配置同置, Linux /var/lib/kunxtier); 日志统一平台日志目录下建应用子目录 (macOS /Library/Logs/kunxtier, Linux /var/log/kunxtier)——修订 T15 "journal 接管" 口径, 服务形态统一文件日志, Linux stderr 仍旁路进 journald
+- 服务形态: macOS root LaunchDaemon (/Library/LaunchDaemons/com.kunxtier.daemon.plist, RunAtLoad + KeepAlive, launchctl bootstrap / bootout); Linux systemd (/etc/systemd/system/kunxtier.service, network-online 之后启动, Restart=on-failure, enable --now); 服务定义只固化二进制绝对路径与 --log-file (install 时按全局配置解析 log_dir), state_dir 不进单元、运行时读配置保持单一事实源; Windows install 占位报错归 T13
+- IPC 权限口径修订: 服务 root 运行下 state 目录 0755 (root) + node.json / WG 私钥 0600 + socket bind 后显式 0666, 信任边界从 "目录 0700 限当前用户" 改为 "本机已登录用户即信任域" (up 仍需令牌); CLI 对 PermissionDenied 误报 "daemon 未运行" 一并修正
+- daemon 补 SIGTERM 优雅停机 (launchd / systemd stop 信号), 与 ctrl-c 同送 shutdown watch, TUN 清理走既有有界停机路径
+- install 行为: 校验 root (非 root 报错给 sudo 提示)、全局配置缺失则以默认值显式生成 (0644) / 存在则只校验、确保 state 与 log 目录及权限就绪、生成服务定义注册并启动, 幂等 (重装覆盖定义并 reload); uninstall 停服删服务定义, state 与全局配置保留
+
+交付按三个子切片推进 (任务仍归 T14 单条, 不拆 tasks):
+
+1. 全局配置基建: NodeGlobalConfig + 平台路径常量 + 分层解析单测, 六个子命令接线 (state_dir 默认源切换)
+2. daemon 服务化核心: SIGTERM 停机、socket 0666 与信任边界更新、PermissionDenied 报错修正
+3. install / uninstall: launchd / systemd 定义生成纯函数 + Command 注入断言, cli/install.rs 子命令, macOS #[ignore] 特权冒烟 (install-服务拉起-自动恢复-uninstall 全链), 文档同步 (requirements FR-9 细化与 FR-11 / arch 补记已随本规划落, CLAUDE.md 与 README 命令示例随交付更新)
+
+架构补记见 arch-kunxtier-overview "服务化与全局配置"; requirements 见 feat-kunxtier-cli "全局配置与目录布局"。
+
 ## 风险与边界
 
 - gotatun (boringtun 维护 fork) 可用性未最终核实; 退路是 vendored boringtun 或 fork 自维护, 不改变模块边界
@@ -140,3 +159,4 @@ kunxtier (轻量 P2P 虚拟组网, ZeroTier / EasyTier 平替) 规划已完成: 
 - 2026-10-27 (开发期补丁): 开发热更走查暴露 relay 运行模式对未初始化状态目录只透传 SQLite 裸错误 (unable to open database file), 难以定位——Store::open 前置拦截目录缺失, 报 "数据目录不存在; 请先执行 kunxtier relay --init 初始化" (init 建目录在先, 不受影响; 运行 / 备份不隐式建库), 补对应单元测试。
 - 2026-10-27 (首启体验裁决, 用户反馈): 免记忆 init 前置命令——运行模式启动前置 ensure_initialized (db 不存在即就地进行 init), 首启 stderr 展示 admin 凭证与指纹; admin 凭证同时写入 state 目录 admin-credential (0600, 与 TLS 私钥同信任域, 服务化输出被 journal 吞掉后可找回), `relay --init` 保留为显式预初始化入口; backup 模式不自动初始化 (沿目录缺失拦截报错)。requirements feat-kunxtier-cli 主流程与命令示例同步; 单元测试 (首启产出 / 凭证文件与权限 / 二次调用幂等) + 全新目录端到端冒烟 (直起 relay: 自动初始化-凭证文件登录 200-控制台 200) 通过。
 - 2026-10-27 (ik-commit 预检修正两项): 其一, 暂存区混入 vite 构建产物 index.html (fresh clone 未构建即白屏)——根治占位页防误提交: 占位页移至 assets/console/placeholder.html (git 跟踪、vite 不清目录不触碰), 产物目录整体 gitignore, 陈旧哈希清理由 console-build 脚本承担, 入口回落链 index.html -> placeholder.html; 其二, 前端无 ErrorBoundary (渲染异常即白屏)——新增根级 ErrorBoundary (getDerivedStateFromError 兜底 + componentDidCatch 控制台留痕 + 重新加载), main.tsx 装配于 StrictMode 最外层。
+- 2026-10-27 (ik-advance): 交付 daemon 服务化切片 (T14), 三个子切片一并完成。① 全局配置基建——core::config 新增 NodeFileConfig / NodeGlobalConfig 与平台路径常量 (macOS 配置与 state 同置 /Library/Application Support/kunxtier, Linux /etc/kunxtier/config.toml + /var/lib/kunxtier; 日志 /Library/Logs/kunxtier 与 /var/log/kunxtier), 字段 state_dir / log_dir / log_level 全非敏感, 分层 CLI > ENV > CONFIG > DEFAULT (空 env 视同未设置, 文件缺失全默认, 非法即报错); install 首次以默认值显式生成配置 (0644, load_or_default 返回待落盘内容, log_level 以注释示例); state 目录默认由 CWD 相对 ./kunxtier-node-state 切至平台固定, daemon / up / down / status 四子命令接线 (install / uninstall 本切片补齐, 六方归一); daemon 级别链修订为 flag > RUST_LOG > 全局配置 > info (log_spec 预读容错, execute 内正式读取时报错, 同 relay 双读惯例)。② daemon 服务化核心——SIGTERM 优雅停机与 ctrl-c 同送 shutdown (spawn_shutdown_signals 定为 async: 注册完成再返回; 初版注册在 spawn 任务内异步完成, 测试 kill 抢在注册前发出走了默认终止, 集成首跑即被捕获); IPC socket bind 后显式 0666 (umask 收紧不生效), state 目录 0700→0755, 身份文件 0600 不变, 信任边界口径修订为 "本机已登录用户即信任域"; CLI 对 PermissionDenied 单列提示, 不再误报 "daemon 未运行"。③ install / uninstall——kunxtier-node 新增 service 模块: 计划 / 执行分离 (Step: Mkdir / Write / Remove / Run + Runner 注入, tolerant 步容忍非零退出支撑幂等重装), macOS LaunchDaemon (com.kunxtier.daemon.plist 0644, RunAtLoad + KeepAlive, bootout (容忍) → bootstrap) 与 Linux systemd (kunxtier.service, network-online 之后启动, daemon-reload → enable --now → restart; 卸载 disable --now → 删 unit → reload) 双平台生成, 服务定义只固化二进制绝对路径与 --log-file (install 时按全局配置解析 log_dir), state_dir 不进单元运行时读配置; EACCES 统一映射 sudo 提权提示 (FR-9); Windows 占位报错归 T13。测试: 全局配置分层与默认模板往返 / socket 0666 与目录 0755 / plist 与 unit 内容及命令序列断言 / 计划执行 (FakeRunner 断言调用序列与 mode 落盘) / 失败命令中止与容忍语义 / SIGTERM 触发停机; cargo make 全量 124 项通过 (fmt / clippy / 测试, 2 项 ignored 为既有特权冒烟)。冒烟: --help 补全 install / uninstall; status 默认目录切至 /Library/Application Support/kunxtier 且未运行指引含 install。已知妥协: launchd 特权冒烟为 #[ignore] 用例 (KUNXTIER_SMOKE_BIN 提供真实二进制, current_exe 为测试进程不可注册); Linux systemctl 真机流程挂人工验证 issue; 二进制 install 冒烟被会话权限拦截未执行, 非提权路径 (sudo 提示) 留待用户或特权用例验证。CLAUDE.md 命令示例同步 (本地开发显式 --state-dir, 服务化两行示例)。提交前预检 (mindset / standards / deep-audit) 修正三项: ① node 根级 service re-export 移除 (execute 别名无调用方且 crate 根命名语义弱, 经 kunxtier_node::service::* 路径使用); ② NodeFileConfig::load 删除 (全仓无调用方, 与 load_or_default 解析逻辑重复); ③ KeepAlive 拉起循环风险——daemon 启动期 state 持久故障 (版本拒读 / 解析失败) 由直接退出进程改为致命态封停留守 (IPC 可用, status 可见致命原因, up 拒绝并指引; 目录 / socket 级环境失败仍退出, 由管理器节流兜底), plist 注释同步行为边界, daemon_ipc 补 corrupted_state_daemon_stays_fatal_alive 集成场景。修正后全量 125 项通过。T14 done; 下一步 T10 e2e 场景矩阵 (环境就绪后执行, 可与人工验证 issue 合并) 或 T13 Windows 平台支持。

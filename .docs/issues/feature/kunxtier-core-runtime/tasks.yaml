@@ -53,7 +53,7 @@ tasks:
     owner: "NODE"
   - id: "T14"
     title: "daemon 服务化: install/uninstall、三平台特权与服务注册、开机自启"
-    status: "todo"
+    status: "done"
     owner: "CLI"
   - id: "T15"
     title: "可观测性基础: 分级结构化日志、关键事件留痕 (打洞/路径切换/信令/凭证)、status --verbose"

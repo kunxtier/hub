@@ -112,6 +112,42 @@ struct Daemon<P: TunFactory> {
     events: Arc<EventRing>,
 }
 
+/// 停机信号装配: ctrl-c (前台交互) 与 SIGTERM (launchd / systemd 停服)
+/// 同送 shutdown, 服务托管下的 stop 走与交互一致的有界停机路径。
+/// SIGTERM 在本函数内同步注册 (await 返回即已接管, 避免竞态漏接信号)。
+pub async fn spawn_shutdown_signals(tx: watch::Sender<bool>) {
+    #[cfg(unix)]
+    let term = {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(sig) => Some(sig),
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM 监听建立失败");
+                None
+            }
+        }
+    };
+    let int_tx = tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = int_tx.send(true);
+        }
+    });
+    #[cfg(unix)]
+    {
+        let term_tx = tx;
+        tokio::spawn(async move {
+            if let Some(mut term) = term {
+                if term.recv().await.is_some() {
+                    let _ = term_tx.send(true);
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = tx;
+}
+
 /// 运行 daemon: 绑定 IPC → 自动恢复 → 事件循环, 直到 shutdown 置位。
 pub async fn serve<P>(
     provider: P,
@@ -132,14 +168,26 @@ where
     // 否则残留 listener 会吞掉后续 daemon 的 IPC 探活与请求
     let accept_task = tokio::spawn(accept_loop(listener, op_tx));
 
+    // 启动期持久故障 (state 版本拒读 / 解析失败) 封停留守而非退出:
+    // 服务托管 KeepAlive 下退出即节流拉起循环; IPC 已可用, status 可见
+    // 致命原因, up 拒绝并指引处理。目录 / socket 级环境失败仍退出
+    // (IPC 无从服务), 重试由服务管理器节流兜底。
+    let (node, load_fatal) = match NodeState::load(&options.state_dir) {
+        Ok(node) => (node, None),
+        Err(e) => {
+            let msg = format!("节点 state 读取失败: {e}");
+            tracing::error!(%msg, "daemon 以致命态启动");
+            (None, Some(msg))
+        }
+    };
     let mut daemon = Daemon {
-        node: NodeState::load(&options.state_dir)?,
+        node,
         provider,
         backoff: options.retry_base,
         options,
         session: None,
         offline_reason: None,
-        fatal: None,
+        fatal: load_fatal,
         events: Arc::new(EventRing::default()),
     };
 
@@ -654,4 +702,35 @@ fn free_udp_port() -> u16 {
     // expect 理由: 环回 UDP 绑定仅在线程资源耗尽时失败, 属环境级故障
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").expect("UDP 端口探测失败");
     sock.local_addr().expect("读取端口失败").port()
+}
+
+// ------------------------------ 单元测试 --------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SIGTERM (launchd / systemd 停服信号) 应与 ctrl-c 同送 shutdown。
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn sigterm_triggers_shutdown() {
+        let (tx, mut rx) = watch::channel(false);
+        // await 返回即已注册接管, 随后的 kill 不会走默认终止
+        spawn_shutdown_signals(tx).await;
+        let pid = std::process::id().to_string();
+        // 发给自身: tokio 信号驱动已接管 SIGTERM, 不会终止测试进程
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if *rx.borrow_and_update() {
+                    return;
+                }
+                rx.changed().await.expect("shutdown 通道不应关闭");
+            }
+        })
+        .await
+        .expect("SIGTERM 应触发停机信号");
+    }
 }

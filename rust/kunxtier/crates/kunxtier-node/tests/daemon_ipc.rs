@@ -7,7 +7,7 @@
 //! 驱动 daemon 会话监督); IP 层用 gotatun 通道免特权注入。覆盖 FR-1
 //! (daemon / up / down / status 命令面)、FR-2 (本地 IPC)、FR-9 前提
 //! (daemon 重启凭 state 自动恢复上线)、FR-17 (同名重注册换发凭证)
-//! 与意外退出后的退避重连。
+//! 与意外退出后的退避重连; T14 增补启动期 state 故障的致命封停。
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -480,4 +480,37 @@ async fn peers_visible_and_reconnect_after_core_restart() {
 
     stop_daemon(daemon_a).await;
     stop_daemon(daemon_b).await;
+}
+
+/// 启动期 state 持久故障 (版本不兼容): daemon 以致命态封停留守而非退出
+/// (T14 服务化: KeepAlive 托管下退出会形成节流拉起循环), IPC 可用、
+/// status 可见致命原因、up 被拒绝并指引处理。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupted_state_daemon_stays_fatal_alive() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "off".into()),
+        )
+        .try_init();
+    let state_dir = tempfile::tempdir().unwrap();
+    let dir = state_dir.path();
+    // 高版本 state: 拒读属持久故障, 修复前 daemon 直接退出进程
+    kunxtier_node::state::ensure_state_dir(dir).unwrap();
+    let mut st = NodeState::from_identity(&kunxtier_node::WgIdentity::generate());
+    st.version = kunxtier_node::STATE_VERSION + 1;
+    std::fs::write(dir.join(STATE_FILE), serde_json::to_vec(&st).unwrap()).unwrap();
+
+    // socket 就绪即证明 daemon 未退出 (封停留守)
+    let daemon = start_daemon(dir).await;
+    let st = status(dir).await;
+    assert!(!st.online);
+    let fatal = st.fatal.expect("应携带致命问题");
+    assert!(fatal.contains("state"), "致命原因应指向 state: {fatal}");
+
+    // up 被致命态拒绝并指引处理
+    let resp = up(dir, Some("token"), "laptop", None, None).await;
+    assert!(!resp.ok);
+    assert!(resp.error.unwrap().contains("致命"), "应提示致命态");
+
+    stop_daemon(daemon).await;
 }

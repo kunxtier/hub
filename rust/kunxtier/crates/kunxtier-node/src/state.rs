@@ -3,8 +3,9 @@
 //! Author: qinzhenya
 //! Created: 2026-10-26
 //!
-//! node.json 集中承载节点全部敏感量 (节点凭证 / WG 私钥), 目录 0700、
-//! 文件 0600, 只存在于本机 state 目录, 不进日志与配置 (NFR-4)。
+//! node.json 集中承载节点全部敏感量 (节点凭证 / WG 私钥), 文件 0600,
+//! 目录 0755 (T14 服务化: IPC socket 位于目录内且 0666, 敏感由文件级
+//! 权限承载), 只存在于本机 state 目录, 不进日志与配置 (NFR-4)。
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -115,14 +116,14 @@ impl NodeState {
     }
 }
 
-/// 创建 state 目录 (0700, 已存在时不改权限)。
+/// 创建 state 目录 (0755, 已存在时不改权限); 敏感量由 node.json 0600 承载。
 pub fn ensure_state_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(0o755)
             .create(dir)?;
     }
     #[cfg(not(unix))]
@@ -197,6 +198,9 @@ mod tests {
         let sub = dir.path().join("nested/dir");
         ensure_state_dir(&sub).unwrap();
         let dir_mode = fs::metadata(&sub).unwrap().permissions().mode() & 0o777;
-        assert_eq!(dir_mode, 0o700, "新建 state 目录必须 0700");
+        assert_eq!(
+            dir_mode, 0o755,
+            "新建 state 目录必须 0755 (socket 所在, 敏感由文件级承载)"
+        );
     }
 }

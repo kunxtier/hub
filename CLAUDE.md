@@ -22,10 +22,11 @@ cargo test
 cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
 # 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发)
 KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地址> --fingerprint <核心指纹> --advertise <对外地址>
-# 节点 (daemon 常驻, up 需特权 TUN; state 目录默认 ./kunxtier-node-state)
-kunxtier daemon &   # 前台守护进程; 另一终端执行:
-kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹>
-kunxtier status && kunxtier down
+# 节点 (daemon 常驻, up 需特权 TUN; state 目录默认读全局配置: macOS /Library/Application Support/kunxtier, Linux /var/lib/kunxtier)
+kunxtier daemon --state-dir ./kunxtier-node-state &   # 本地开发前台守护进程; 另一终端执行:
+kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹> --state-dir ./kunxtier-node-state
+kunxtier status --state-dir ./kunxtier-node-state && kunxtier down --state-dir ./kunxtier-node-state
+# 服务化 (生产): sudo kunxtier install 注册系统服务与开机自启 (首次生成全局配置); kunxtier uninstall 反向清理 (state 与配置保留)
 
 # 本地 Web 控制台 (托管页面并反代核心 admin API; 核心中继亦直接托管同一页面)
 kunxtier console --relay <核心地址> --fingerprint <核心指纹>

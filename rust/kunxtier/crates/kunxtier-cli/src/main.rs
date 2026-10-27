@@ -3,10 +3,10 @@
 //! Author: qinzhenya
 //! Created: 2026-10-20
 //!
-//! 当前切片: relay (init / run / backup / 卫星模式)、admin 管理与
-//! 节点侧 daemon / up / down / status (含 --verbose 排障视图);
-//! relay / daemon 支持 --log-level 与 --log-file (stderr / 文件双写);
-//! console 与 install 随后续切片接入。
+//! 当前切片: relay (init / run / backup / 卫星模式)、admin 管理、
+//! 节点侧 daemon / up / down / status (含 --verbose 排障视图)、
+//! 本地控制台 console 与服务化 install / uninstall (T14, 节点全局配置);
+//! relay / daemon 支持 --log-level 与 --log-file (stderr / 文件双写)。
 
 mod cli;
 mod logging;

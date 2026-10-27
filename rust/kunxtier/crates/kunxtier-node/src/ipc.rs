@@ -4,8 +4,9 @@
 //! Created: 2026-10-26
 //!
 //! 传输为 state 目录内的 Unix domain socket (Windows named pipe 随
-//! Windows 平台切片落地, 接口形态不变); 目录 0700 即信任边界, 限定
-//! 本机当前用户。协议为单连接单请求: 一行 JSON 进、一行 JSON 出。
+//! Windows 平台切片落地, 接口形态不变); 服务化后 daemon 常以 root 运行,
+//! socket 显式 0666——本机已登录用户即信任域 (up 仍需令牌, 身份与私钥
+//! 文件 0600 不动)。协议为单连接单请求: 一行 JSON 进、一行 JSON 出。
 //! 令牌 / 凭证只在帧内流动, 不入日志。
 
 use std::io;
@@ -219,7 +220,11 @@ pub async fn bind(path: &Path) -> io::Result<tokio::net::UnixListener> {
                 Err(_) => std::fs::remove_file(path)?,
             }
         }
-        tokio::net::UnixListener::bind(path)
+        let listener = tokio::net::UnixListener::bind(path)?;
+        // 服务化 (T14): root 形态下放开给本机任意用户, umask 收紧不生效故显式设置
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
+        Ok(listener)
     }
     #[cfg(not(unix))]
     {
@@ -362,6 +367,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = socket_path(dir.path());
         let listener = bind(&path).await.unwrap();
+        // 服务化口径: socket 显式 0666, 本机任意用户可达
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o666, "IPC socket 必须 0666");
+        }
         let path2 = path.clone();
         tokio::spawn(async move {
             let (mut conn, _) = listener.accept().await.unwrap();

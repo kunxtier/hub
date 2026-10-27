@@ -5,35 +5,45 @@
 //!
 //! daemon 是常驻服务端 (持有 TUN 与运行时会话); up / down / status 是
 //! 经本地 IPC 的薄客户端, daemon 未运行时给出明确提示与启动指引。
-//! state 目录承载节点身份与 IPC socket, 默认 ./kunxtier-node-state。
+//! state 目录承载节点身份与 IPC socket, 定位走机器级全局配置
+//! (CLI > ENV > CONFIG > 平台默认, 见 feat-kunxtier-cli "全局配置与目录布局")。
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
-use tokio::sync::watch;
 
+use kunxtier_core::config::{node_config_path, NodeGlobalConfig};
 use kunxtier_node::daemon::{serve, DaemonOptions, TunAdapterFactory};
 use kunxtier_node::events::EventRecord;
 use kunxtier_node::ipc::{self, IpcRequest, IpcResponse, IpcStatus};
 
 use super::error::Fail;
 
-const DEFAULT_STATE_DIR: &str = "./kunxtier-node-state";
 /// daemon 重连退避起步值 (指数增长至 30s)。
 const RETRY_BASE: Duration = Duration::from_secs(1);
+
+/// 解析节点全局配置; 文件缺失走平台默认, 解析失败即时报错。
+fn node_global(cli_state_dir: Option<PathBuf>) -> Result<NodeGlobalConfig, Fail> {
+    NodeGlobalConfig::load(cli_state_dir, |k| std::env::var(k).ok()).map_err(|e| {
+        Fail::usage(format!(
+            "全局配置读取失败 ({}): {e}",
+            node_config_path().display()
+        ))
+    })
+}
 
 /// 前台运行节点守护进程 (通常由终端或 install 的服务拉起)。
 #[derive(Args)]
 pub struct DaemonArgs {
-    /// 节点 state 目录 (身份 / 凭证 / IPC socket 所在)
-    #[arg(long, env = "KUNXTIER_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
-    pub state_dir: PathBuf,
+    /// 节点 state 目录 (缺省读全局配置, 再缺省取平台默认目录)
+    #[arg(long, env = "KUNXTIER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
     /// WG 固定监听端口 (缺省首次注册时自动选择并随 state 持久化)
     #[arg(long)]
     pub listen_port: Option<u16>,
-    /// 日志级别 error/warn/info/debug/trace (覆盖 RUST_LOG)
+    /// 日志级别 error/warn/info/debug/trace (覆盖 RUST_LOG 与全局配置)
     #[arg(long)]
     pub log_level: Option<String>,
     /// 日志文件路径 (启用后 stderr / 文件双写, 按大小轮转保留一份 .old)
@@ -56,23 +66,23 @@ pub struct UpArgs {
     /// 核心证书指纹 hex (首次注册必填)
     #[arg(long, env = "KUNXTIER_FINGERPRINT")]
     pub fingerprint: Option<String>,
-    /// 节点 state 目录 (需与 daemon 一致)
-    #[arg(long, env = "KUNXTIER_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
-    pub state_dir: PathBuf,
+    /// 节点 state 目录 (需与 daemon 一致; 缺省读全局配置)
+    #[arg(long, env = "KUNXTIER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// 断开网络会话 (daemon 留守, 注册身份保留)。
 #[derive(Args)]
 pub struct DownArgs {
-    #[arg(long, env = "KUNXTIER_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
-    pub state_dir: PathBuf,
+    #[arg(long, env = "KUNXTIER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// 本机与对端状态 (路径 direct / relay)。
 #[derive(Args)]
 pub struct StatusArgs {
-    #[arg(long, env = "KUNXTIER_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
-    pub state_dir: PathBuf,
+    #[arg(long, env = "KUNXTIER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
     /// 排障视图: 附带最近关键事件 (打洞 / 路径 / 信令 / 注册)
     #[arg(long)]
     pub verbose: bool,
@@ -80,22 +90,18 @@ pub struct StatusArgs {
 
 impl DaemonArgs {
     pub fn execute(self) -> Result<(), Fail> {
+        let global = node_global(self.state_dir.clone())?;
         let options = DaemonOptions {
-            state_dir: self.state_dir,
+            state_dir: global.state_dir,
             listen_port: self.listen_port,
             retry_base: RETRY_BASE,
         };
         // expect 理由: 仅在系统线程资源耗尽时失败, 属环境级故障, 无恢复价值
         let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
         rt.block_on(async move {
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            // ctrl-c 即停机 (前台运行形态; 服务形态由服务管理器发信号)
-            let sig_tx = shutdown_tx.clone();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    let _ = sig_tx.send(true);
-                }
-            });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            // ctrl-c (前台交互) 与 SIGTERM (launchd / systemd 停服) 同送停机
+            kunxtier_node::daemon::spawn_shutdown_signals(shutdown_tx).await;
             serve(TunAdapterFactory, options, shutdown_rx).await
         })
         .map_err(|e| Fail::runtime(format!("daemon 退出: {e}")))
@@ -110,7 +116,8 @@ impl UpArgs {
             core: self.core.clone(),
             fingerprint: self.fingerprint.clone(),
         };
-        let resp = call_daemon(&self.state_dir, req)?;
+        let state_dir = node_global(self.state_dir)?.state_dir;
+        let resp = call_daemon(&state_dir, req)?;
         match resp {
             IpcResponse {
                 ok: true,
@@ -130,7 +137,8 @@ impl UpArgs {
 
 impl DownArgs {
     pub fn execute(self) -> Result<(), Fail> {
-        let resp = call_daemon(&self.state_dir, IpcRequest::Down)?;
+        let state_dir = node_global(self.state_dir)?.state_dir;
+        let resp = call_daemon(&state_dir, IpcRequest::Down)?;
         match resp {
             IpcResponse { ok: true, .. } => println!("已断开 (daemon 留守, 身份保留)"),
             other => {
@@ -150,7 +158,8 @@ impl StatusArgs {
         } else {
             IpcRequest::Status
         };
-        let resp = call_daemon(&self.state_dir, req)?;
+        let state_dir = node_global(self.state_dir)?.state_dir;
+        let resp = call_daemon(&state_dir, req)?;
         match resp {
             IpcResponse {
                 ok: true,
@@ -168,7 +177,7 @@ impl StatusArgs {
     }
 }
 
-/// 单请求往返; 连接类错误转成 daemon 未运行指引 (FR-2)。
+/// 单请求往返; 连接类错误转成 daemon 未运行指引 (FR-2), 权限错误单独提示。
 fn call_daemon(state_dir: &Path, req: IpcRequest) -> Result<IpcResponse, Fail> {
     let path = ipc::socket_path(state_dir);
     let call = ipc::request(&path, &req);
@@ -176,9 +185,19 @@ fn call_daemon(state_dir: &Path, req: IpcRequest) -> Result<IpcResponse, Fail> {
     let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
     match rt.block_on(call) {
         Ok(resp) => Ok(resp),
-        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused | io::ErrorKind::PermissionDenied) => Err(Fail::usage(format!(
-            "daemon 未运行 ({}): 请先执行 kunxtier daemon --state-dir {} (或安装系统服务), 再执行本命令",
-            e,
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Err(Fail::usage(format!(
+                "daemon 未运行 ({}): 请先执行 kunxtier daemon (本地开发) 或 sudo kunxtier install 注册系统服务",
+                state_dir.display()
+            )))
+        }
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(Fail::usage(format!(
+            "无权限访问 daemon IPC ({}): 请确认 state 目录权限或以相应用户执行",
             state_dir.display()
         ))),
         Err(e) => Err(Fail::runtime(format!("IPC 请求失败: {e}"))),

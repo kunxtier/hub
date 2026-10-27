@@ -217,6 +217,153 @@ impl SatelliteConfig {
     }
 }
 
+// ------------------------------ 节点全局配置 ------------------------------
+
+/// 节点 state 目录的 env 键 (与 CLI --state-dir 同义)。
+pub const ENV_NODE_STATE_DIR: &str = "KUNXTIER_STATE_DIR";
+
+/// 节点机器级全局配置文件路径 (T14 服务化; Windows 路径随平台切片定稿)。
+pub fn node_config_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/kunxtier/config.toml")
+    }
+    // 其余 unix (含 Linux) 走发行版惯例 /etc
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        PathBuf::from("/etc/kunxtier/config.toml")
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from("./kunxtier-config.toml")
+    }
+}
+
+/// state 目录平台默认 (macOS 与配置同置, ZeroTier 先例)。
+pub fn node_state_dir_default() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/kunxtier")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        PathBuf::from("/var/lib/kunxtier")
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from("./kunxtier-node-state")
+    }
+}
+
+/// 日志目录平台默认 (各平台日志根下建应用子目录)。
+pub fn node_log_dir_default() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Logs/kunxtier")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        PathBuf::from("/var/log/kunxtier")
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from("./kunxtier-logs")
+    }
+}
+
+/// 节点全局配置文件层 (机器级, 全部非敏感; 敏感字段只走 env)。
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct NodeFileConfig {
+    pub state_dir: Option<String>,
+    pub log_dir: Option<String>,
+    /// 日志级别 (error/warn/info/debug/trace); 级别链 CLI flag > RUST_LOG > 本层 > 默认 info。
+    pub log_level: Option<String>,
+}
+
+impl NodeFileConfig {
+    /// install 用: 文件缺失时以平台默认值显式生成 (返回内容待落盘, 可读可改), 存在则原样读取。
+    pub fn load_or_default(path: &Path) -> Result<(Self, Option<String>)> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let file = toml::from_str::<Self>(&text)
+                    .map_err(|e| Error::Config(format!("配置文件解析失败: {e}")))?;
+                Ok((file, None))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let content = Self::render_default();
+                // expect 理由: render_default 输出自控常量模板, 解析失败属实现回归, 单测已覆盖
+                let file = toml::from_str(&content).expect("默认全局配置模板解析失败");
+                Ok((file, Some(content)))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 默认配置模板: 目录显式落盘 (运维可见可改), log_level 以注释示例呈现。
+    fn render_default() -> String {
+        format!(
+            "# kunxtier 节点全局配置 (机器级; 敏感字段不进本文件, 只走环境变量)\n\
+             # state / 日志目录与日志级别; 优先级 CLI > ENV > 本文件 > 默认\n\
+             state_dir = \"{}\"\n\
+             log_dir = \"{}\"\n\
+             # log_level = \"info\"\n",
+            node_state_dir_default().display(),
+            node_log_dir_default().display(),
+        )
+    }
+}
+
+/// 解析后的节点全局配置: 目录定位与日志级别 (daemon / up / down / status / install 共用)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeGlobalConfig {
+    pub state_dir: PathBuf,
+    pub log_dir: PathBuf,
+    pub log_level: Option<String>,
+}
+
+impl NodeGlobalConfig {
+    /// 读机器级配置文件并解析; 文件缺失按全默认处理 (不视为错误)。
+    pub fn load(
+        cli_state_dir: Option<PathBuf>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        let path = node_config_path();
+        let file = match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str::<NodeFileConfig>(&text).map_err(|e| {
+                Error::Config(format!("全局配置解析失败 ({}): {e}", path.display()))
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => NodeFileConfig::default(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self::resolve(cli_state_dir, env, file))
+    }
+
+    /// state_dir 分层 CLI > ENV > CONFIG > DEFAULT; log_dir / log_level 为 CONFIG > DEFAULT。
+    pub fn resolve(
+        cli_state_dir: Option<PathBuf>,
+        env: impl Fn(&str) -> Option<String>,
+        file: NodeFileConfig,
+    ) -> Self {
+        let state_dir = cli_state_dir
+            .or_else(|| {
+                env(ENV_NODE_STATE_DIR)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| file.state_dir.map(PathBuf::from))
+            .unwrap_or_else(node_state_dir_default);
+        let log_dir = file
+            .log_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(node_log_dir_default);
+        Self {
+            state_dir,
+            log_dir,
+            log_level: file.log_level,
+        }
+    }
+}
+
 // ------------------------------ 单元测试 --------------------------------
 
 #[cfg(test)]
@@ -324,6 +471,74 @@ mod tests {
             advertise: None,
         };
         assert!(RelayConfig::resolve(cli, no_env, FileConfig::default()).is_err());
+    }
+
+    #[test]
+    fn node_config_defaults_follow_platform() {
+        let cfg = NodeGlobalConfig::resolve(None, no_env, NodeFileConfig::default());
+        assert_eq!(cfg.state_dir, node_state_dir_default());
+        assert_eq!(cfg.log_dir, node_log_dir_default());
+        assert_eq!(cfg.log_level, None);
+        // 平台默认显式核对 (开发机分支实际执行)
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                cfg.state_dir,
+                PathBuf::from("/Library/Application Support/kunxtier")
+            );
+            assert_eq!(cfg.log_dir, PathBuf::from("/Library/Logs/kunxtier"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/kunxtier"));
+            assert_eq!(cfg.log_dir, PathBuf::from("/var/log/kunxtier"));
+        }
+    }
+
+    #[test]
+    fn node_config_state_dir_priority_cli_env_file_default() {
+        let file = NodeFileConfig {
+            state_dir: Some("./from-file".into()),
+            log_dir: Some("/logs".into()),
+            log_level: Some("debug".into()),
+        };
+        // CLI 胜出
+        let cfg = NodeGlobalConfig::resolve(Some("./from-cli".into()), no_env, file.clone());
+        assert_eq!(cfg.state_dir, PathBuf::from("./from-cli"));
+        // ENV 胜 FILE
+        let env = |k: &str| (k == ENV_NODE_STATE_DIR).then(|| "./from-env".to_string());
+        let cfg = NodeGlobalConfig::resolve(None, env, file.clone());
+        assert_eq!(cfg.state_dir, PathBuf::from("./from-env"));
+        // FILE 胜默认; log 层随文件
+        let cfg = NodeGlobalConfig::resolve(None, no_env, file);
+        assert_eq!(cfg.state_dir, PathBuf::from("./from-file"));
+        assert_eq!(cfg.log_dir, PathBuf::from("/logs"));
+        assert_eq!(cfg.log_level.as_deref(), Some("debug"));
+        // 空 env 视同未设置
+        let empty_env = |k: &str| (k == ENV_NODE_STATE_DIR).then(String::new);
+        let cfg = NodeGlobalConfig::resolve(None, empty_env, NodeFileConfig::default());
+        assert_eq!(cfg.state_dir, node_state_dir_default());
+    }
+
+    #[test]
+    fn node_file_config_default_template_roundtrips() {
+        let rendered = NodeFileConfig::render_default();
+        assert!(rendered.contains("state_dir"));
+        assert!(rendered.contains("# log_level"));
+        // 模板可被解析回配置层 (install 落盘后即是一份合法配置)
+        let parsed: NodeFileConfig = toml::from_str(&rendered).unwrap();
+        assert_eq!(
+            parsed.state_dir.as_deref(),
+            Some(node_state_dir_default().to_str().unwrap())
+        );
+        assert_eq!(
+            parsed.log_dir.as_deref(),
+            Some(node_log_dir_default().to_str().unwrap())
+        );
+        assert_eq!(parsed.log_level, None);
+        // 非法值形态被拒绝
+        assert!(toml::from_str::<NodeFileConfig>("state_dir = [1]").is_err());
+        assert!(toml::from_str::<NodeFileConfig>("state_dir = 1").is_err());
     }
 
     #[test]

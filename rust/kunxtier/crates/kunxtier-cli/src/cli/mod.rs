@@ -6,15 +6,18 @@
 pub mod admin;
 mod console;
 pub mod error;
+mod install;
 mod node;
 mod relay;
 
 use clap::{Parser, Subcommand};
+use kunxtier_core::config::NodeGlobalConfig;
 
 use crate::logging::LogSpec;
 pub use admin::AdminCommand;
 pub use console::ConsoleArgs;
 use error::Fail;
+pub use install::{InstallArgs, UninstallArgs};
 pub use node::{DaemonArgs, DownArgs, StatusArgs, UpArgs};
 pub use relay::RelayCommand;
 
@@ -45,20 +48,31 @@ pub enum Command {
     Status(StatusArgs),
     /// 本地起 Web 控制台 (托管页面并反代核心 admin API)
     Console(ConsoleArgs),
+    /// 注册系统服务与开机自启 (首次生成全局配置; 需 root)
+    Install(InstallArgs),
+    /// 停服并移除系统服务注册 (state 与全局配置保留)
+    Uninstall(UninstallArgs),
 }
 
 impl Command {
-    /// 日志装配输入: 长驻进程 (relay / daemon) 携带 flag 层, relay 另取配置文件层。
+    /// 日志装配输入: 长驻进程 (relay / daemon) 携带 flag 层, relay 取配置文件层,
+    /// daemon 取节点全局配置层 (预读容错, execute 内正式读取时报错)。
     pub fn log_spec(&self) -> (LogSpec, Option<String>) {
         match self {
             Command::Relay(cmd) => cmd.log_spec(),
-            Command::Daemon(args) => (
-                LogSpec {
-                    level: args.log_level.clone(),
-                    file: args.log_file.clone(),
-                },
-                None,
-            ),
+            Command::Daemon(args) => {
+                let config_level =
+                    NodeGlobalConfig::load(args.state_dir.clone(), |k| std::env::var(k).ok())
+                        .ok()
+                        .and_then(|c| c.log_level);
+                (
+                    LogSpec {
+                        level: args.log_level.clone(),
+                        file: args.log_file.clone(),
+                    },
+                    config_level,
+                )
+            }
             _ => (LogSpec::default(), None),
         }
     }
@@ -72,6 +86,8 @@ impl Command {
             Command::Down(cmd) => cmd.execute(),
             Command::Status(cmd) => cmd.execute(),
             Command::Console(cmd) => cmd.execute(),
+            Command::Install(cmd) => cmd.execute(),
+            Command::Uninstall(cmd) => cmd.execute(),
         }
     }
 }

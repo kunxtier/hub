@@ -34,7 +34,7 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 ### 节点日常使用
 
 1. `kunxtier up --token <token> --name laptop` 首次注册并连接
-2. `kunxtier install` 注册系统服务与开机自启 (按平台需要提权); `kunxtier uninstall` 反向清理
+2. `kunxtier install` 注册系统服务与开机自启 (按平台需要提权); 首次执行生成机器级全局配置 (见 "全局配置与目录布局"); `kunxtier uninstall` 反向清理 (state 与全局配置保留)
 3. `kunxtier status` 查看本机与对端状态; `kunxtier status --verbose` 输出最近路径事件与打洞失败原因
 4. `kunxtier down` 断开
 
@@ -68,9 +68,9 @@ kunxtier up --token <token> --name laptop        # 首次注册并连接 (令牌
 kunxtier status                                  # 本机与对端状态 (路径 direct / relay)
 kunxtier status --verbose                        # 排障视图: 最近路径事件与打洞失败原因
 kunxtier down                                    # 断开
-kunxtier daemon                                  # 前台运行守护进程 (通常由 install 的服务拉起)
-kunxtier install                                 # 注册系统服务 + 开机自启 (按平台需提权)
-kunxtier uninstall                               # 移除服务注册
+kunxtier daemon                                  # 前台运行守护进程 (通常由 install 的服务拉起; 本地开发需显式 --state-dir)
+kunxtier install                                 # 注册系统服务 + 开机自启 (首次生成全局配置; 需 root)
+kunxtier uninstall                               # 停服并移除服务注册 (state 与全局配置保留)
 
 # ── 管理 (admin 凭证走 env 或独立文件) ────────────────────────
 kunxtier admin network create [--cidr 100.66.0.0/16]  # 建网络组 (地址段默认按创建顺序递增)
@@ -89,6 +89,22 @@ kunxtier admin relay status                           # 卫星中继注册状态
 
 以上为规划口径的完整命令面, 与 FR-1 的子命令清单一一对应; 实现期参数命名可微调, 以 `kunxtier --help` 为最终事实。
 
+### 全局配置与目录布局
+
+节点侧配置与存储全局化管理: 机器级全局配置文件承载存储位置与日志级别, daemon / up / down / status / install / uninstall 读取同一份; 敏感字段 (注册令牌 / 指纹 / relay 令牌) 不进配置文件, 仍只走 env。
+
+| 平台 | 全局配置 | state 默认 | 日志默认 |
+| ---- | -------- | ---------- | -------- |
+| Linux | /etc/kunxtier/config.toml | /var/lib/kunxtier | /var/log/kunxtier |
+| macOS | /Library/Application Support/kunxtier/config.toml | /Library/Application Support/kunxtier | /Library/Logs/kunxtier |
+| Windows | %ProgramData%\kunxtier\config.toml (随平台切片) | — | — |
+
+- 配置字段: `state_dir` / `log_dir` / `log_level`; 同一字段优先级 CLI flag > 环境变量 > 全局配置 > 平台默认 (FR-7)
+- 配置文件缺失时全默认可用; install 首次执行以默认值显式生成 (root 所有 0644, 可读可改), 已存在则只校验不改写
+- 服务定义只固化二进制路径与日志文件位置 (平台日志目录下应用子目录), state 目录运行时读全局配置, 保持单一事实源
+- IPC socket 位于 state 目录; 服务以 root 运行时目录 0755、身份与私钥文件 0600、socket 0666——本机已登录用户即可执行 up / down / status (up 仍需令牌), 私钥不出信任域
+- 本地开发 (免提权) 跑 daemon 时需显式 `--state-dir` 指向工作目录
+
 ## 功能要求
 
 | 编号 | 说明 | 验收标准 |
@@ -101,13 +117,16 @@ kunxtier admin relay status                           # 卫星中继注册状态
 | FR-6 | 首次初始化自动生成密钥材料 | 生成结果落在 state 目录并设置严格文件权限 (0600) |
 | FR-7 | 配置遵循 CLI > ENV > CONFIG > DEFAULT 分层 | 同一字段多层出现时按该优先级生效, 行为有单元测试覆盖 |
 | FR-8 | macOS / Linux / Windows 三平台发布产物 | 提供可交叉编译的统一构建入口 |
-| FR-9 | daemon 服务化: install / uninstall 注册系统服务与开机自启 | 系统重启后 daemon 自动恢复并上线; 三平台特权要求 (Windows 管理员 / macOS root / Linux root) 在文档与安装提示中明确 |
+| FR-9 | daemon 服务化: install / uninstall 注册系统服务 (macOS launchd / Linux systemd) 与开机自启 | 系统重启后 daemon 自动恢复并上线; uninstall 停服并清理服务定义, state 与全局配置保留; 三平台特权要求 (Windows 管理员 / macOS root / Linux root) 在文档与安装提示中明确 |
 | FR-10 | 数据与状态可迁移可备份: SQLite 带 schema 版本并只做前向迁移; 节点 state 文件带版本字段; `relay backup` 导出一致性备份 | 新版本二进制打开旧库自动迁移不丢数据; 备份文件可在新机恢复出完整网络状态 |
+| FR-11 | 节点侧机器级全局配置承载 state_dir / log_dir / log_level (见 "全局配置与目录布局") | 配置缺失全默认可用; install / daemon / up / down / status 读取一致; 优先级与非法值拒绝行为有单元测试覆盖 |
 
 ## 边界与约束
 
 - Web 控制台的功能需求由 feat-kunxtier-console 承载, 本文档只约定入口与部署形态
 - daemon 服务化只覆盖 daemon 角色; relay / console / 卫星由系统单元 (systemd / launchd) 直接托管
+- relay 配置维持独立 relay.toml 分层, 不并入机器级全局配置; 两者统一作为独立演进项评估
+- Windows 的服务注册随 Windows 平台支持落地, 现阶段 install 在 Windows 明确报错占位
 - relay 的验证环境为 Linux; macOS 声明支持, Windows 上运行 relay 不在 MVP 验证范围
 - 核心中继监听地址、数据目录等长期配置走配置文件; TLS 私钥、admin 凭证、relay 令牌走 env 或独立文件
 
