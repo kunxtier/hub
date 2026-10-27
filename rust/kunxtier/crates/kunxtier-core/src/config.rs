@@ -222,14 +222,10 @@ impl SatelliteConfig {
 /// 节点 state 目录的 env 键 (与 CLI --state-dir 同义)。
 pub const ENV_NODE_STATE_DIR: &str = "KUNXTIER_STATE_DIR";
 
-/// 节点机器级全局配置文件路径 (T14 服务化; Windows 路径随平台切片定稿)。
+/// 节点机器级全局配置文件路径 (unix 各平台统一 /etc, 发行版 daemon 惯例,
+/// 2026-10-27 布局修订; Windows 路径随平台切片定稿)。
 pub fn node_config_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Application Support/kunxtier/config.toml")
-    }
-    // 其余 unix (含 Linux) 走发行版惯例 /etc
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     {
         PathBuf::from("/etc/kunxtier/config.toml")
     }
@@ -239,13 +235,9 @@ pub fn node_config_path() -> PathBuf {
     }
 }
 
-/// state 目录平台默认 (macOS 与配置同置, ZeroTier 先例)。
+/// state 目录平台默认 (unix 各平台统一 /var/lib; 原 macOS 与配置同置布局已废弃)。
 pub fn node_state_dir_default() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Application Support/kunxtier")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     {
         PathBuf::from("/var/lib/kunxtier")
     }
@@ -255,13 +247,9 @@ pub fn node_state_dir_default() -> PathBuf {
     }
 }
 
-/// 日志目录平台默认 (各平台日志根下建应用子目录)。
+/// 日志目录平台默认 (unix 各平台统一 /var/log 下应用子目录)。
 pub fn node_log_dir_default() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Logs/kunxtier")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     {
         PathBuf::from("/var/log/kunxtier")
     }
@@ -310,6 +298,16 @@ impl NodeFileConfig {
             node_state_dir_default().display(),
             node_log_dir_default().display(),
         )
+    }
+
+    /// daemon 首启生成: 文件缺失时以默认模板原子落盘 (0644, 可读可改), 已存在则
+    /// 不动, 返回是否落盘; 与 install 共用 load_or_default, 已存在且非法同样报错。
+    pub fn ensure_written(path: &Path) -> Result<bool> {
+        let Some(content) = Self::load_or_default(path)?.1 else {
+            return Ok(false);
+        };
+        crate::atomic_file::write_atomic(path, content.as_bytes(), 0o644)?;
+        Ok(true)
     }
 }
 
@@ -479,16 +477,8 @@ mod tests {
         assert_eq!(cfg.state_dir, node_state_dir_default());
         assert_eq!(cfg.log_dir, node_log_dir_default());
         assert_eq!(cfg.log_level, None);
-        // 平台默认显式核对 (开发机分支实际执行)
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                cfg.state_dir,
-                PathBuf::from("/Library/Application Support/kunxtier")
-            );
-            assert_eq!(cfg.log_dir, PathBuf::from("/Library/Logs/kunxtier"));
-        }
-        #[cfg(target_os = "linux")]
+        // 平台默认显式核对 (unix 各平台同构, 2026-10-27 布局修订)
+        #[cfg(unix)]
         {
             assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/kunxtier"));
             assert_eq!(cfg.log_dir, PathBuf::from("/var/log/kunxtier"));
@@ -539,6 +529,71 @@ mod tests {
         // 非法值形态被拒绝
         assert!(toml::from_str::<NodeFileConfig>("state_dir = [1]").is_err());
         assert!(toml::from_str::<NodeFileConfig>("state_dir = 1").is_err());
+    }
+
+    #[test]
+    fn ensure_written_generates_missing_template_and_keeps_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+
+        // 缺失: 建父目录并落默认模板, 0644, 可解析回配置层
+        assert!(NodeFileConfig::ensure_written(&path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: NodeFileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed.state_dir.as_deref(),
+            Some(node_state_dir_default().to_str().unwrap())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "全局配置必须 0644");
+        }
+
+        // 已存在: 不改写 (自定义内容保留), 返回 false
+        std::fs::write(&path, "state_dir = \"/custom\"\n").unwrap();
+        assert!(!NodeFileConfig::ensure_written(&path).unwrap());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("/custom"));
+    }
+
+    #[test]
+    fn ensure_written_rejects_invalid_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "state_dir = [1]").unwrap();
+        assert!(NodeFileConfig::ensure_written(&path).is_err());
+    }
+
+    #[test]
+    fn ensure_written_rejects_unreadable_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "state_dir = \"/x\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        assert!(NodeFileConfig::ensure_written(&path).is_err());
+    }
+
+    #[test]
+    fn ensure_written_rejects_directory_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("as-dir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(NodeFileConfig::ensure_written(&path).is_err());
+    }
+
+    #[test]
+    fn ensure_written_treats_empty_existing_file_as_kept() {
+        // 空文件是合法 (全默认) 配置, 视为已存在: 不生成不改写
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        assert!(!NodeFileConfig::ensure_written(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
     #[test]

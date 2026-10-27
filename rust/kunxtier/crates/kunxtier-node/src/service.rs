@@ -13,6 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use kunxtier_core::atomic_file::write_atomic;
+
 use crate::error::{Error, Result};
 
 /// 服务装配输入: daemon 二进制绝对路径与日志文件路径。
@@ -154,25 +156,8 @@ fn mkdir(dir: &Path) -> io::Result<()> {
 }
 
 fn write_file(file: &FileWrite) -> io::Result<()> {
-    if let Some(parent) = file.path.parent() {
-        if !parent.as_os_str().is_empty() {
-            mkdir(parent)?;
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(file.mode)
-            .open(&file.path)?;
-        f.write_all(file.content.as_bytes())
-    }
-    #[cfg(not(unix))]
-    std::fs::write(&file.path, &file.content)
+    // 原子写与父目录创建统一收口在 core::atomic_file (与配置生成 / node.json 同源)
+    write_atomic(&file.path, file.content.as_bytes(), file.mode)
 }
 
 fn run_command(cmd: &CommandSpec, runner: &dyn Runner) -> Result<()> {
@@ -475,7 +460,7 @@ mod tests {
     fn macos_install_plan_generates_plist_and_launchctl_sequence() {
         let spec = ServiceSpec {
             bin: "/usr/local/bin/kunxtier".into(),
-            log_file: "/Library/Logs/kunxtier/daemon.log".into(),
+            log_file: "/var/log/kunxtier/daemon.log".into(),
         };
         let plan = install_plan(&spec).unwrap();
         assert_eq!(
@@ -490,7 +475,7 @@ mod tests {
                 assert!(c.contains("com.kunxtier.daemon"));
                 assert!(c.contains("/usr/local/bin/kunxtier</string>"));
                 assert!(c.contains("--log-file"));
-                assert!(c.contains("/Library/Logs/kunxtier/daemon.log"));
+                assert!(c.contains("/var/log/kunxtier/daemon.log"));
                 assert!(c.contains("<key>RunAtLoad</key>"));
                 assert!(c.contains("<key>KeepAlive</key>"));
             }

@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use clap::Args;
 
-use kunxtier_core::config::{node_config_path, NodeGlobalConfig};
+use kunxtier_core::config::{node_config_path, NodeFileConfig, NodeGlobalConfig};
+use kunxtier_core::error::Error as CoreError;
 use kunxtier_node::daemon::{serve, DaemonOptions, TunAdapterFactory};
 use kunxtier_node::events::EventRecord;
 use kunxtier_node::ipc::{self, IpcRequest, IpcResponse, IpcStatus};
@@ -24,9 +25,18 @@ use super::error::Fail;
 /// daemon 重连退避起步值 (指数增长至 30s)。
 const RETRY_BASE: Duration = Duration::from_secs(1);
 
+/// 空 state_dir (如空 env 经 clap 折叠为 Some("")) 视同未设置,
+/// 与配置层 "空 env 视同未设置" 语义对齐。
+fn normalize_state_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    dir.filter(|p| !p.as_os_str().is_empty())
+}
+
 /// 解析节点全局配置; 文件缺失走平台默认, 解析失败即时报错。
 fn node_global(cli_state_dir: Option<PathBuf>) -> Result<NodeGlobalConfig, Fail> {
-    NodeGlobalConfig::load(cli_state_dir, |k| std::env::var(k).ok()).map_err(|e| {
+    NodeGlobalConfig::load(normalize_state_dir(cli_state_dir), |k| {
+        std::env::var(k).ok()
+    })
+    .map_err(|e| {
         Fail::usage(format!(
             "全局配置读取失败 ({}): {e}",
             node_config_path().display()
@@ -91,6 +101,20 @@ pub struct StatusArgs {
 impl DaemonArgs {
     pub fn execute(self) -> Result<(), Fail> {
         let global = node_global(self.state_dir.clone())?;
+        // 首启生成全局配置: 仅平台默认目录形态 (无 CLI / env 覆盖) 落默认模板;
+        // 显式 --state-dir 属本地开发, 不触碰机器级路径
+        if normalize_state_dir(self.state_dir.clone()).is_none() {
+            let path = node_config_path();
+            let generated = NodeFileConfig::ensure_written(&path).map_err(|e| match e {
+                CoreError::Io(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                    daemon_permission_hint()
+                }
+                other => Fail::usage(format!("全局配置写入失败 ({}): {other}", path.display())),
+            })?;
+            if generated {
+                println!("已生成全局配置: {}", path.display());
+            }
+        }
         let options = DaemonOptions {
             state_dir: global.state_dir,
             listen_port: self.listen_port,
@@ -104,8 +128,27 @@ impl DaemonArgs {
             kunxtier_node::daemon::spawn_shutdown_signals(shutdown_tx).await;
             serve(TunAdapterFactory, options, shutdown_rx).await
         })
-        .map_err(|e| Fail::runtime(format!("daemon 退出: {e}")))
+        .map_err(daemon_start_fail)
     }
+}
+
+/// daemon 启动失败出口: 权限不足映射提权指引 (TUN 特权与机器级目录写权限),
+/// 其余保留原语境。
+fn daemon_start_fail(e: kunxtier_node::Error) -> Fail {
+    match &e {
+        kunxtier_node::Error::Io(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            daemon_permission_hint()
+        }
+        _ => Fail::runtime(format!("daemon 退出: {e}")),
+    }
+}
+
+/// 提权指引统一出口: 非 root 前台运行必然踩 TUN 与机器级目录双重特权。
+fn daemon_permission_hint() -> Fail {
+    Fail::usage(
+        "权限不足: daemon 需要 TUN 特权与机器级目录写权限; 前台运行请 sudo kunxtier daemon, \
+         本地开发可用 --state-dir 指定工作目录, 生产环境请 sudo kunxtier install 注册系统服务",
+    )
 }
 
 impl UpArgs {
@@ -242,5 +285,40 @@ fn print_status(status: &IpcStatus, events: Option<&[EventRecord]>) {
                 None => println!("[{}] {}\t-\t{}", ev.ts, ev.kind, ev.detail),
             }
         }
+    }
+}
+
+// ------------------------------ 单元测试 --------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_denied_maps_to_privilege_hint() {
+        let e = kunxtier_node::Error::Io(std::io::Error::from(io::ErrorKind::PermissionDenied));
+        let msg = daemon_start_fail(e).to_string();
+        assert!(msg.contains("sudo"), "应包含提权指引: {msg}");
+        assert!(msg.contains("--state-dir"), "应包含本地开发出路: {msg}");
+        assert!(msg.contains("install"), "应包含服务化出路: {msg}");
+    }
+
+    #[test]
+    fn other_daemon_errors_keep_original_context() {
+        let e = kunxtier_node::Error::Config("bad".into());
+        let msg = daemon_start_fail(e).to_string();
+        assert!(msg.contains("daemon 退出"), "保留原语境: {msg}");
+        assert!(!msg.contains("sudo"));
+    }
+
+    #[test]
+    fn empty_state_dir_treated_as_unset() {
+        // 空 env 经 clap 折叠为 Some(""), 必须归一回 "未设置" 语义
+        assert!(normalize_state_dir(None).is_none());
+        assert!(normalize_state_dir(Some(PathBuf::from(""))).is_none());
+        assert_eq!(
+            normalize_state_dir(Some(PathBuf::from("./x"))),
+            Some(PathBuf::from("./x"))
+        );
     }
 }

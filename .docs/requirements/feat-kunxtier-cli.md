@@ -95,12 +95,12 @@ kunxtier admin relay status                           # 卫星中继注册状态
 
 | 平台 | 全局配置 | state 默认 | 日志默认 |
 | ---- | -------- | ---------- | -------- |
-| Linux | /etc/kunxtier/config.toml | /var/lib/kunxtier | /var/log/kunxtier |
-| macOS | /Library/Application Support/kunxtier/config.toml | /Library/Application Support/kunxtier | /Library/Logs/kunxtier |
+| Linux / macOS | /etc/kunxtier/config.toml | /var/lib/kunxtier | /var/log/kunxtier |
 | Windows | %ProgramData%\kunxtier\config.toml (随平台切片) | — | — |
 
 - 配置字段: `state_dir` / `log_dir` / `log_level`; 同一字段优先级 CLI flag > 环境变量 > 全局配置 > 平台默认 (FR-7)
-- 配置文件缺失时全默认可用; install 首次执行以默认值显式生成 (root 所有 0644, 可读可改), 已存在则只校验不改写
+- 配置文件缺失时全默认可用; install 或 daemon 首启 (平台默认目录形态, 无 CLI / env 覆盖) 以默认值显式生成 (0644, 可读可改), 已存在则只校验不改写
+- daemon 非 root 前台启动在机器级目录遇权限不足时, 明确指引 sudo 前台运行 / `--state-dir` 本地开发 / `sudo kunxtier install` 服务化三条出路
 - 服务定义只固化二进制路径与日志文件位置 (平台日志目录下应用子目录), state 目录运行时读全局配置, 保持单一事实源
 - IPC socket 位于 state 目录; 服务以 root 运行时目录 0755、身份与私钥文件 0600、socket 0666——本机已登录用户即可执行 up / down / status (up 仍需令牌), 私钥不出信任域
 - 本地开发 (免提权) 跑 daemon 时需显式 `--state-dir` 指向工作目录

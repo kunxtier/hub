@@ -103,13 +103,14 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 
 daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-11), 目标是服务与 CLI 对同一份机器级配置和存储位置达成一致, 不依赖调用时的工作目录。
 
-- 全局配置: NodeGlobalConfig 承载机器级配置文件 (Linux /etc/kunxtier/config.toml, macOS /Library/Application Support/kunxtier/config.toml, Windows 随平台切片), 字段 state_dir / log_dir / log_level, 全部非敏感; 落 kunxtier-core, 沿用 FileConfig + resolve 集中合并惯例, 分层 CLI > ENV > CONFIG > DEFAULT, 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 统一读取; relay 的 relay.toml 分层维持独立, 是否并入机器级配置留独立切片评估
-- 目录布局: state 目录由 CWD 相对默认改为平台固定 (macOS /Library/Application Support/kunxtier 与配置同置, Linux /var/lib/kunxtier), 日志统一平台日志目录下应用子目录 (macOS /Library/Logs/kunxtier, Linux /var/log/kunxtier)
+- 全局配置: NodeGlobalConfig 承载机器级配置文件 (macOS / Linux 统一 /etc/kunxtier/config.toml, Windows 随平台切片), 字段 state_dir / log_dir / log_level, 全部非敏感; 落 kunxtier-core, 沿用 FileConfig + resolve 集中合并惯例, 分层 CLI > ENV > CONFIG > DEFAULT, 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 统一读取; daemon 以平台默认目录形态首启且文件缺失时就地生成默认模板 (同 install), 非 root 启动的权限失败映射 sudo / --state-dir / install 指引; relay 的 relay.toml 分层维持独立, 是否并入机器级配置留独立切片评估
+- 目录布局: state 目录由 CWD 相对默认改为平台固定 (unix 统一 /var/lib/kunxtier), 日志统一 unix 应用子目录 /var/log/kunxtier; 2026-10-27 布局修订: macOS 弃用 /Library/Application Support 与配置同置布局 (ZeroTier 先例废弃), 与 Linux 统一 (OPT-kunxtier-node-unix-layout)
 - 服务注册: macOS 为 root LaunchDaemon (/Library/LaunchDaemons/com.kunxtier.daemon.plist, RunAtLoad + KeepAlive, 经 launchctl bootstrap / bootout 管理); Linux 为 systemd 系统单元 (/etc/systemd/system/kunxtier.service, network-online 之后启动, Restart=on-failure); 服务定义只固化二进制绝对路径与 --log-file (install 时按全局配置解析日志位置), state_dir 不进单元, 运行时读全局配置保持单一事实源; Windows 注册随平台切片
 - install / uninstall: install 校验提权 (非 root 报错并给 sudo 提示), 全局配置缺失则以默认值显式生成 (0644), 确保 state / log 目录与权限就绪, 注册并启动, 幂等; uninstall 停服并删除服务定义, state 与全局配置保留
 - 日志归属: 服务形态统一文件日志 <log_dir>/daemon.log (复用既有大小轮转), 修订此前 "journal 接管" 口径; Linux 下 stderr 仍双写进 journald, 作为旁路观测面
 - 停机信号: SIGTERM 与 ctrl-c 同送 shutdown watch, launchd / systemd stop 走有界停机, TUN 清理路径可靠
 - IPC 权限口径: 服务以 root 运行, state 目录 0755 (root), 节点身份与 WG 私钥 0600, IPC socket 显式 0666; 信任边界从 "目录 0700 限当前用户" 修订为 "本机已登录用户即信任域"——up 仍需一次性令牌, 私钥不出 0600 信任域
+- 机器级产物完整参考 (配置文件与字段 / 状态存储 / 日志落点与轮转 / 权限与生命周期, 含 relay 侧) 见 impl-kunxtier-runtime-layout.md
 
 ## 设计原则与约束
 
@@ -143,6 +144,7 @@ daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-
 | 排障事件: daemon 内存事件环 vs 解析日志文件 | 内存事件环 | status --verbose 免文件解析、内存有界、IPC 直取; 代价是进程重启即清零, 历史回看仍依赖日志文件 |
 | daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转; 服务化后由 install 固化 `--log-file` 到平台日志目录, journal 退为 Linux 旁路; 代价是手动后台运行时需显式开文件或自行重定向 |
 | 节点存储目录: 平台固定 (全局配置可改) vs CWD 相对默认 | 平台固定 | 服务与 CLI 免传参对齐, 服务拉起不再依赖工作目录; 代价是本地开发需显式 --state-dir |
+| macOS 机器布局: /Library/Application Support (ZeroTier 先例) vs unix 统一 /etc + /var | 统一 unix 布局 (2026-10-27 修订) | 终端应用 + 特权服务气质一致, 两平台一套心智; 代价是弃 Finder 可达性与 ZeroTier 先例依据 |
 | IPC socket 0666 vs 管理组 0660 | 0666 (本机用户信任域) | 服务 root 形态下普通用户可用 up / down / status, 规避跨平台组语义差异; 代价是本机任意用户可断开会话 (up 仍需令牌) |
 | 服务单元固化 --log-file vs 运行时探测服务形态 | install 时固化 | 单元自描述、无形态探测魔法; 代价是改 log_dir 后需重跑 install 再生成单元 |
 | console 浏览器直连核心 API (CORS) vs 本地反代 | 本地反代 | 浏览器仅连本地进程, 自签证书信任与 TLS 指纹固定收口在反代层, 无 CORS 面; 代价是 console 子命令多一层代理实现 |

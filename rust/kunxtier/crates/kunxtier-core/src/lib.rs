@@ -6,6 +6,7 @@
 //! 不承载任何一侧的私有业务状态。
 
 pub mod address;
+pub mod atomic_file;
 pub mod config;
 pub mod error;
 pub mod protocol;

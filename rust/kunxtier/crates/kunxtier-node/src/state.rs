@@ -8,13 +8,12 @@
 //! 权限承载), 只存在于本机 state 目录, 不进日志与配置 (NFR-4)。
 
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use kunxtier_core::atomic_file::write_atomic;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -81,18 +80,7 @@ impl NodeState {
         ensure_state_dir(dir)?;
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| Error::Config(format!("state 序列化失败: {e}")))?;
-        let tmp = dir.join(format!("{STATE_FILE}.tmp"));
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        fs::rename(&tmp, dir.join(STATE_FILE))?;
+        write_atomic(&dir.join(STATE_FILE), &json, 0o600)?;
         Ok(())
     }
 
