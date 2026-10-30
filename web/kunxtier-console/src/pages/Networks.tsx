@@ -27,7 +27,7 @@ export default function NetworksPage() {
   const networks = networksQuery.data ?? [];
 
   return (
-    <section className="flex max-w-2xl flex-col gap-5">
+    <section className="flex flex-col gap-5">
       <div>
         <h1 className="text-lg font-semibold">网络组</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">

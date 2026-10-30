@@ -15,7 +15,7 @@ export default function RelaysPage() {
   const relays = relaysQuery.data ?? [];
 
   return (
-    <section className="flex max-w-2xl flex-col gap-5">
+    <section className="flex flex-col gap-5">
       <div>
         <h1 className="text-lg font-semibold">中继</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">

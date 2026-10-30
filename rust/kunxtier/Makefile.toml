@@ -17,7 +17,8 @@ KUNXTIER_DATA_DIR = "./kunxtier-state"
 
 [tasks.build]
 category = "构建"
-description = "编译全部 crate (debug)"
+description = "一键构建: 先构建前端产物, 再编译全部 crate (debug)"
+dependencies = ["console-build"]
 command = "cargo"
 args = ["build", "--workspace"]
 
@@ -29,7 +30,8 @@ args = ["check", "--workspace"]
 
 [tasks.build-release]
 category = "构建"
-description = "编译 release 产物"
+description = "一键 release 构建: 先构建前端产物, 再编译 release 产物"
+dependencies = ["console-build"]
 command = "cargo"
 args = ["build", "--workspace", "--release"]
 
@@ -99,16 +101,16 @@ cargo run -p kunxtier-cli --bin kunxtier -- relay backup ./backup-$(date +%Y%m%d
 
 # ---- 控制台 ----
 # 前端源码 web/kunxtier-console (pnpm + Vite); 构建产物经 vite outDir 直接输出
-# relay assets/console/ 嵌入。缺省流程不含本域任务, Rust 侧开发不依赖 Node 工具链。
+# relay assets/console/ 嵌入, outDir 清理由 vite (emptyOutDir) 负责。
+# include_dir 为编译期读入: 产物落地后须重编 relay crate (构建脚本末尾 touch
+# console.rs), 且正在运行的进程不热载, 需重启才生效。
+# build / build-release 链直接执行本任务, 前端构建失败即中断构建链。
 
 [tasks.console-build]
 category = "控制台"
-description = "安装前端依赖并构建产物至 relay assets/console (需 Node 与 pnpm)"
+description = "构建前端产物至 relay assets/console (需 Node 与 pnpm)"
 cwd = "../../web/kunxtier-console"
 script = '''
-# 清理陈旧哈希产物 (占位页 placeholder.html 与新产物除外, vite 不清目录)
-find ../../rust/kunxtier/crates/kunxtier-relay/assets/console \
-  -mindepth 1 -maxdepth 1 ! -name placeholder.html -exec rm -rf {} +
 pnpm install --frozen-lockfile
 pnpm build
 # include_dir 读入的资产变更不被 cargo 跟踪, 触碰源文件强制下次编译重新嵌入

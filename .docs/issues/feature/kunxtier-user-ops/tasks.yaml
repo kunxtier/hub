@@ -1,0 +1,5 @@
+tasks:
+  - id: "T01"
+    title: "enable / rename / delete 三操作四层补齐 (store / API / CLI / 控制台) 与需求 FR-1 同步"
+    status: "done"
+    owner: "SRV"

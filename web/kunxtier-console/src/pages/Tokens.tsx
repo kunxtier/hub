@@ -9,11 +9,16 @@ import { useState, type FormEvent } from "react";
 import { errorMessage } from "@/api/client";
 import {
   useCreateUserMutation,
+  useDeleteUserMutation,
   useDisableUserMutation,
+  useEnableUserMutation,
   useIssueTokenMutation,
+  useRenameUserMutation,
   useRevokeTokenMutation,
+  useUsersQuery,
 } from "@/api/hooks";
 import type { IssueTokenResponse } from "@/api/types";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +26,7 @@ import { Select, SelectValue } from "@/components/ui/select";
 import { SelectContent } from "@/components/ui/select-content";
 import { SelectItem } from "@/components/ui/select-item";
 import { SelectTrigger } from "@/components/ui/select-trigger";
+import { formatTime } from "@/lib/summary";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/AppContext";
 
@@ -39,6 +45,9 @@ export default function TokensPage() {
   const revokeMutation = useRevokeTokenMutation();
   const createUserMutation = useCreateUserMutation();
   const disableUserMutation = useDisableUserMutation();
+  const enableUserMutation = useEnableUserMutation();
+  const renameUserMutation = useRenameUserMutation();
+  const deleteUserMutation = useDeleteUserMutation();
 
   const [kind, setKind] = useState<"node" | "relay">("node");
   const [user, setUser] = useState("");
@@ -47,16 +56,20 @@ export default function TokensPage() {
   const [copied, setCopied] = useState(false);
   const [revokeId, setRevokeId] = useState("");
   const [newUser, setNewUser] = useState("");
-  const [disableUser, setDisableUser] = useState("");
+  const usersQuery = useUsersQuery(network);
+  const users = usersQuery.data ?? [];
 
   const anyError =
     issueMutation.error ??
     revokeMutation.error ??
     createUserMutation.error ??
-    disableUserMutation.error;
+    disableUserMutation.error ??
+    enableUserMutation.error ??
+    renameUserMutation.error ??
+    deleteUserMutation.error;
 
   return (
-    <section className="flex max-w-2xl flex-col gap-5">
+    <section className="flex flex-col gap-5">
       <div>
         <h1 className="text-lg font-semibold">令牌与用户</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">
@@ -203,34 +216,87 @@ export default function TokensPage() {
           )}
         </form>
 
-        <form
+        <div
           className={cn(
             "flex flex-col gap-3 rounded-lg p-4", // 布局
             "border border-border", // 分层
           )}
-          onSubmit={(event) => submitDisableUser(event)}
         >
-          <h2 className="font-medium">禁用用户</h2>
-          <p className="text-xs text-muted-foreground">名下节点凭证即吊销断线, 令牌全部失效</p>
-          <div className="flex items-end gap-2">
-            <div className="flex flex-1 flex-col gap-1">
-              <Label htmlFor="disable-user">用户名</Label>
-              <Input
-                id="disable-user"
-                placeholder="要禁用的用户"
-                value={disableUser}
-                onChange={(event) => setDisableUser(event.target.value)}
-              />
+          <h2 className="font-medium">用户列表</h2>
+          <p className="text-xs text-muted-foreground">
+            属主标注与令牌归属; 禁用即吊销名下节点凭证与令牌
+          </p>
+          {usersQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground">用户加载中</p>
+          ) : users.length === 0 ? (
+            <p className="text-sm text-muted-foreground">网络组内暂无用户</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                    <th className="py-1.5 pr-3 font-medium">用户</th>
+                    <th className="py-1.5 pr-3 font-medium">状态</th>
+                    <th className="py-1.5 pr-3 font-medium">创建</th>
+                    <th className="py-1.5 font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map((entry) => (
+                    <tr key={entry.name} className="border-b border-border last:border-b-0">
+                      <td className="py-1.5 pr-3 font-medium">{entry.name}</td>
+                      <td className="py-1.5 pr-3">
+                        <Badge variant={entry.disabled ? "danger" : "neutral"}>
+                          {entry.disabled ? "已禁用" : "正常"}
+                        </Badge>
+                      </td>
+                      <td className="py-1.5 pr-3 text-xs text-muted-foreground">
+                        {formatTime(entry.created_at)}
+                      </td>
+                      <td className="py-1.5">
+                        <div className="flex gap-1.5">
+                          {entry.disabled ? (
+                            <Button
+                              size="sm"
+                              disabled={enableUserMutation.isPending}
+                              onClick={() => enableUserByName(entry.name)}
+                            >
+                              启用
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              disabled={disableUserMutation.isPending}
+                              onClick={() => disableUserByName(entry.name)}
+                            >
+                              禁用
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            disabled={renameUserMutation.isPending}
+                            onClick={() => renameUserByName(entry.name)}
+                          >
+                            改名
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={deleteUserMutation.isPending}
+                            onClick={() => deleteUserByName(entry.name)}
+                          >
+                            删除
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <Button
-              type="submit"
-              variant="destructive"
-              disabled={disableUserMutation.isPending || network === null || !disableUser.trim()}
-            >
-              禁用
-            </Button>
-          </div>
-        </form>
+          )}
+        </div>
       </div>
 
       <form
@@ -278,14 +344,35 @@ export default function TokensPage() {
     }
   }
 
-  /** 提交禁用用户 (不可逆操作走二次确认)。 */
-  function submitDisableUser(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (network !== null && disableUser.trim()) {
-      const name = disableUser.trim();
-      if (window.confirm(`禁用用户 ${name}? 其名下节点将全部断线`)) {
-        disableUserMutation.mutate({ network, name });
-      }
+  /** 禁用用户 (名下节点即断线, 可经启用恢复)。 */
+  function disableUserByName(name: string) {
+    if (network !== null && window.confirm(`禁用用户 ${name}? 其名下节点将全部断线`)) {
+      disableUserMutation.mutate({ network, name });
+    }
+  }
+
+  /** 启用用户 (禁用的逆操作)。 */
+  function enableUserByName(name: string) {
+    if (network !== null) {
+      enableUserMutation.mutate({ network, name });
+    }
+  }
+
+  /** 改名 (属主标注随之传播)。 */
+  function renameUserByName(name: string) {
+    if (network === null) {
+      return;
+    }
+    const newName = window.prompt(`将用户 ${name} 改名为:`, name)?.trim();
+    if (newName && newName !== name) {
+      renameUserMutation.mutate({ network, name, newName });
+    }
+  }
+
+  /** 删除用户 (名下有未移除节点时服务端拒绝)。 */
+  function deleteUserByName(name: string) {
+    if (network !== null && window.confirm(`删除用户 ${name}? 其历史令牌一并清理`)) {
+      deleteUserMutation.mutate({ network, name });
     }
   }
 }

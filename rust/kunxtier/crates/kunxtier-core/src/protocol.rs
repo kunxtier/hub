@@ -41,6 +41,13 @@ pub struct CreateUserRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RenameUserRequest {
+    pub network: String,
+    pub name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IssueTokenRequest {
     pub network: String,
     pub user: Option<String>,
@@ -76,6 +83,16 @@ pub struct SetNodePolicyRequest {
 pub struct NetworkInfo {
     pub name: String,
     pub cidr: String,
+    pub created_at: i64,
+}
+
+/// 用户 (属主) 列表条目; 用户为属主标注概念 (feat-kunxtier-access FR-4),
+/// 管理面可见性靠本列表, 无属主登录入口。
+#[derive(Debug, Serialize)]
+pub struct UserInfo {
+    pub network: String,
+    pub name: String,
+    pub disabled: bool,
     pub created_at: i64,
 }
 

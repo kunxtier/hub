@@ -13,7 +13,7 @@ use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use kunxtier_core::address;
-use kunxtier_core::protocol::{NetworkInfo, NodeInfo, PathPolicy, SignalPeer};
+use kunxtier_core::protocol::{NetworkInfo, NodeInfo, PathPolicy, SignalPeer, UserInfo};
 use kunxtier_core::token::{self, Kind};
 
 use crate::{Error, Result};
@@ -232,10 +232,19 @@ impl Store {
             return Err(Error::Usage("网络名仅允许 1-32 位字母数字与 - _".into()));
         }
         let cidr = format!("{}/16", address::ipv4_from_u32(base));
-        self.conn.execute(
-            "INSERT INTO networks(name, base, created_at) VALUES(?1, ?2, ?3)",
-            params![name, base, now()],
-        )?;
+        self.conn
+            .execute(
+                "INSERT INTO networks(name, base, created_at) VALUES(?1, ?2, ?3)",
+                params![name, base, now()],
+            )
+            .map_err(|e| match &e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Error::Usage(format!("网络组已存在: {name}"))
+                }
+                _ => Error::Store(e),
+            })?;
         tracing::info!(network = name, cidr = %cidr, "网络组创建");
         Ok(NetworkInfo {
             name: name.to_string(),
@@ -288,12 +297,42 @@ impl Store {
             return Err(Error::Usage("用户名仅允许 1-32 位字母数字与 - _".into()));
         }
         let (nid, _) = self.network_id(network)?;
-        self.conn.execute(
-            "INSERT INTO users(network_id, name, created_at) VALUES(?1, ?2, ?3)",
-            params![nid, name, now()],
-        )?;
+        self.conn
+            .execute(
+                "INSERT INTO users(network_id, name, created_at) VALUES(?1, ?2, ?3)",
+                params![nid, name, now()],
+            )
+            .map_err(|e| match &e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Error::Usage(format!("用户已存在: 网络组 {network} 内 {name}"))
+                }
+                _ => Error::Store(e),
+            })?;
         tracing::info!(network, user = name, "用户创建");
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 用户 (属主) 列表; network 为 None 时跨网络组全量。
+    pub fn list_users(&self, network: Option<&str>) -> Result<Vec<UserInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT nw.name, u.name, u.disabled, u.created_at
+             FROM users u JOIN networks nw ON nw.id = u.network_id
+             WHERE (?1 IS NULL OR nw.name = ?1)
+             ORDER BY u.network_id, u.id",
+        )?;
+        let rows = stmt
+            .query_map(params![network], |r| {
+                Ok(UserInfo {
+                    network: r.get(0)?,
+                    name: r.get(1)?,
+                    disabled: r.get::<_, i64>(2)? != 0,
+                    created_at: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// 禁用用户: 其名下令牌签发被拒 (存量节点凭证的实时吊销随信令阶段接入)。
@@ -308,6 +347,78 @@ impl Store {
             return Err(Error::Usage(format!("用户不存在或已禁用: {name}")));
         }
         tracing::info!(network, user = name, "用户禁用");
+        Ok(())
+    }
+
+    /// 启用用户 (禁用的逆操作): 名下令牌恢复可用, 节点重连即恢复。
+    pub fn enable_user(&self, network: &str, name: &str) -> Result<()> {
+        let (nid, _) = self.network_id(network)?;
+        let n = self.conn.execute(
+            "UPDATE users SET disabled = 0
+             WHERE network_id = ?1 AND name = ?2 AND disabled = 1",
+            params![nid, name],
+        )?;
+        if n == 0 {
+            return Err(Error::Usage(format!("用户不存在或未禁用: {name}")));
+        }
+        tracing::info!(network, user = name, "用户启用");
+        Ok(())
+    }
+
+    /// 改名: 名下节点与令牌按 user_id 关联, 属主标注随之传播 (无需迁移)。
+    pub fn rename_user(&self, network: &str, name: &str, new_name: &str) -> Result<()> {
+        if !valid_name(new_name) {
+            return Err(Error::Usage("用户名仅允许 1-32 位字母数字与 - _".into()));
+        }
+        let (nid, _) = self.network_id(network)?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE users SET name = ?3 WHERE network_id = ?1 AND name = ?2",
+                params![nid, name, new_name],
+            )
+            .map_err(|e| match &e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Error::Usage(format!("用户已存在: 网络组 {network} 内 {new_name}"))
+                }
+                _ => Error::Store(e),
+            })?;
+        if n == 0 {
+            return Err(Error::Usage(format!("用户不存在: {name}")));
+        }
+        tracing::info!(network, from = name, to = new_name, "用户改名");
+        Ok(())
+    }
+
+    /// 删除用户: 名下存在未移除节点时拒绝 (先移除节点); 历史令牌随用户清理,
+    /// 已移除节点的属主引用置空 (标注退为 "-")。三步写包事务, 原子生效。
+    pub fn delete_user(&self, network: &str, name: &str) -> Result<()> {
+        let (nid, _) = self.network_id(network)?;
+        let uid = match self.user_row(nid, name)? {
+            Some((id, _)) => id,
+            None => return Err(Error::Usage(format!("用户不存在: {name}"))),
+        };
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE user_id = ?1 AND removed_at IS NULL",
+            params![uid],
+            |r| r.get(0),
+        )?;
+        if active > 0 {
+            return Err(Error::Usage(format!(
+                "用户 {name} 名下仍有 {active} 个未移除节点, 先移除节点再删除"
+            )));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM tokens WHERE user_id = ?1", params![uid])?;
+        tx.execute(
+            "UPDATE nodes SET user_id = NULL WHERE user_id = ?1",
+            params![uid],
+        )?;
+        tx.execute("DELETE FROM users WHERE id = ?1", params![uid])?;
+        tx.commit()?;
+        tracing::info!(network, user = name, "用户删除");
         Ok(())
     }
 
@@ -714,6 +825,24 @@ mod tests {
         assert!(msg.contains("relay --init"), "实际: {msg}");
     }
 
+    #[test]
+    fn 重名创建映射为业务错误而非内部错误() {
+        // 唯一约束冲突出口为 Usage (400 业务提示), 不落 500 内部错误
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_user("default", "alice").unwrap();
+
+        let err = s.create_user("default", "alice").unwrap_err();
+        assert!(matches!(err, Error::Usage(_)), "实际: {err:?}");
+        assert!(err.to_string().contains("用户已存在"), "实际: {err}");
+
+        let err = s
+            .create_network("default", address::nth_network_base(0).unwrap())
+            .unwrap_err();
+        assert!(matches!(err, Error::Usage(_)), "实际: {err:?}");
+        assert!(err.to_string().contains("网络组已存在"), "实际: {err}");
+    }
+
     fn default_network(s: &Store) {
         s.create_network("default", address::nth_network_base(0).unwrap())
             .unwrap();
@@ -721,6 +850,60 @@ mod tests {
 
     fn wg_key() -> String {
         STANDARD.encode([7u8; 32])
+    }
+
+    #[test]
+    fn 用户列表_跨网络与禁用状态() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_network("net2", address::nth_network_base(1).unwrap())
+            .unwrap();
+        s.create_user("default", "alice").unwrap();
+        s.create_user("net2", "bob").unwrap();
+        s.disable_user("net2", "bob").unwrap();
+
+        let all = s.list_users(None).unwrap();
+        assert_eq!(all.len(), 2);
+        let bob = all.iter().find(|u| u.name == "bob").unwrap();
+        assert_eq!(bob.network, "net2");
+        assert!(bob.disabled);
+
+        let only = s.list_users(Some("default")).unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].name, "alice");
+        assert!(!only[0].disabled);
+    }
+
+    #[test]
+    fn 用户操作_启用改名删除() {
+        let (_d, s) = store();
+        default_network(&s);
+        s.create_user("default", "alice").unwrap();
+
+        // 禁用 / 启用往返
+        s.disable_user("default", "alice").unwrap();
+        s.enable_user("default", "alice").unwrap();
+        assert!(!s.list_users(Some("default")).unwrap()[0].disabled);
+
+        // 改名: 冲突拒绝, 成功后节点属主标注随之传播
+        s.create_user("default", "bob").unwrap();
+        let err = s.rename_user("default", "bob", "alice").unwrap_err();
+        assert!(err.to_string().contains("用户已存在"), "实际: {err}");
+        let (_id, t) = s
+            .issue_token("default", Some("alice"), "node", 3600)
+            .unwrap();
+        s.consume_node_token(&t, "laptop", &wg_key()).unwrap();
+        s.rename_user("default", "alice", "alice2").unwrap();
+        let nodes = s.list_nodes(Some("default")).unwrap();
+        assert_eq!(nodes[0].owner.as_deref(), Some("alice2"));
+
+        // 名下有未移除节点时拒绝删除; 移除节点后可删, 用户从列表消失
+        let err = s.delete_user("default", "alice2").unwrap_err();
+        assert!(err.to_string().contains("未移除节点"), "实际: {err}");
+        s.remove_node("default", "laptop").unwrap();
+        s.delete_user("default", "alice2").unwrap();
+        let users = s.list_users(Some("default")).unwrap();
+        assert!(users.iter().all(|u| u.name != "alice2"));
     }
 
     #[test]

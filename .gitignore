@@ -35,6 +35,6 @@ kunxtier-state/
 kunxtier-node-state/
 *.db
 
-# kunxtier 控制台前端构建产物 (随 git 保留的占位页 placeholder.html 除外)
-rust/kunxtier/crates/kunxtier-relay/assets/console/*
-!rust/kunxtier/crates/kunxtier-relay/assets/console/placeholder.html
+# kunxtier 控制台前端构建产物 (vite 输出并全量清理; 目录由 relay build.rs 保证存在,
+# fresh clone 的兜底占位页内嵌于 relay console.rs)
+rust/kunxtier/crates/kunxtier-relay/assets/console/

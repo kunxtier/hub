@@ -1,5 +1,5 @@
 /*
- * Description: admin API 客户端 (会话令牌仅存模块内存, 401 统一广播登出)
+ * Description: admin API 客户端 (会话令牌 sessionStorage 标签页级续期, 401 统一广播登出)
  *
  * Author: qinzhenya
  * Created: 2026-10-27
@@ -20,8 +20,20 @@ interface ApiRequestInit {
   json?: unknown;
 }
 
-/** 会话令牌 (内存态, FR-7 无本地存储: 刷新即重登)。 */
-let sessionToken: string | null = null;
+/** 会话令牌持久化键 (sessionStorage: 标签页生命周期, 关标签即失效)。 */
+const SESSION_STORAGE_KEY = "kunxtier-console-session";
+
+/** 会话令牌 (内存态; 标签页内刷新经 sessionStorage 续期, FR-7 管理数据不落本地)。 */
+let sessionToken: string | null = readStoredToken();
+
+/** 读回标签页内持久化的会话令牌 (隐私模式等存取受限时静默降级为刷新重登)。 */
+function readStoredToken(): string | null {
+  try {
+    return sessionStorage.getItem(SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /** API 调用错误: HTTP 状态 + 后端错误码 + 可读信息。 */
 export class ApiRequestError extends Error {
@@ -38,9 +50,18 @@ export class ApiRequestError extends Error {
   }
 }
 
-/** 写入会话令牌 (登录成功 / 登出清空)。 */
+/** 写入会话令牌 (登录成功 / 登出清空 / 401 失效), 同步标签页级持久化。 */
 export function setToken(token: string | null): void {
   sessionToken = token;
+  try {
+    if (token === null) {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+    }
+  } catch {
+    // 存取受限 (隐私模式) 时退化为刷新重登, 不影响当前会话
+  }
 }
 
 /** 从任意抛出错误提取用户可读文案 (mutation / query 错误展示统一入口)。 */

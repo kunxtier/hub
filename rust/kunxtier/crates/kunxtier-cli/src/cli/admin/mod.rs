@@ -57,9 +57,16 @@ enum AdminAction {
 
 impl AdminCommand {
     pub fn execute(self) -> Result<(), Fail> {
-        let credential = std::env::var("KUNXTIER_ADMIN").map_err(|_| {
-            Fail::usage("缺少 admin 凭证: 请设置环境变量 KUNXTIER_ADMIN (见 relay --init 输出)")
-        })?;
+        // 空串 / 纯空白视同未设置: 空凭证发到服务端只会得到难排查的 401
+        let credential = std::env::var("KUNXTIER_ADMIN")
+            .ok()
+            .filter(|c| !c.trim().is_empty())
+            .ok_or_else(|| {
+                Fail::usage(
+                    "缺少 admin 凭证: 请设置环境变量 KUNXTIER_ADMIN \
+                     (见 relay --init 输出, 或 state 目录 admin-credential 文件)",
+                )
+            })?;
         let remote = AdminRemote::new(&self.server, &self.fingerprint, &credential);
         match self.action {
             AdminAction::Network { action } => action.execute(&remote),

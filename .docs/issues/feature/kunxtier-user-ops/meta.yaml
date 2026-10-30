@@ -1,0 +1,12 @@
+id: "FEAT-kunxtier-user-ops-241031"
+type: "feature"
+slug: "kunxtier-user-ops"
+title: "kunxtier 用户管理完整操作集"
+status: "closed"
+priority: "medium"
+owner: "SRV"
+tags:
+  - "kunxtier"
+  - "verify-finding"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"

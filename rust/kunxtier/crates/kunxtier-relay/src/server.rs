@@ -13,7 +13,7 @@ use std::time::Duration;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
@@ -22,8 +22,8 @@ use kunxtier_core::config::RelayConfig;
 use kunxtier_core::protocol::{
     ApiErrorBody, CreateNetworkRequest, CreateUserRequest, IssueTokenRequest, IssueTokenResponse,
     LoginRequest, LoginResponse, NetworkInfo, NodeInfo, PeerPathReport, RegisterRequest,
-    RegisterResponse, RelayInfo, RemoveNodeRequest, SetNodePolicyRequest, SignalRelay,
-    SignalServerMsg,
+    RegisterResponse, RelayInfo, RemoveNodeRequest, RenameUserRequest, SetNodePolicyRequest,
+    SignalRelay, SignalServerMsg, UserInfo,
 };
 
 use crate::forward::ForwardRegistry;
@@ -173,8 +173,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/admin/networks",
             get(list_networks).post(create_network),
         )
-        .route("/api/admin/users", post(create_user))
+        .route("/api/admin/users", get(list_users).post(create_user))
         .route("/api/admin/users/disable", post(disable_user))
+        .route("/api/admin/users/enable", post(enable_user))
+        .route("/api/admin/users/rename", post(rename_user))
+        .route("/api/admin/users/delete", post(delete_user))
         .route("/api/admin/tokens", post(issue_token))
         .route("/api/admin/tokens/{id}/revoke", post(revoke_token))
         .route("/api/admin/login", post(login))
@@ -187,8 +190,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ws/relay", get(crate::forward::core_ws_handler))
         .route("/ws/satellite", get(crate::satellite::ws_handler))
         // 控制台托管: 嵌入资源按路径命中, 页面路径回落入口页;
-        // /api 与 /ws 未匹配保持 404 JSON
-        .fallback_service(get(crate::console::serve_console))
+        // /api 与 /ws 未匹配保持 404 JSON (any: 任意方法都进 handler 判定,
+        // 若用 get 则 POST 类未匹配路径在 MethodRouter 层被 405 拦截)
+        .fallback_service(any(crate::console::serve_console))
         .with_state(state)
 }
 
@@ -332,6 +336,16 @@ async fn create_network(
     Ok(Json(info))
 }
 
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<NodesQuery>,
+) -> ApiResult<Json<Vec<UserInfo>>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    Ok(Json(state.lock_store().list_users(q.network.as_deref())?))
+}
+
 async fn create_user(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -358,6 +372,41 @@ async fn disable_user(
     for name in nodes {
         state.online.kick(&req.network, &name);
     }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn enable_user(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<CreateUserRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    state.lock_store().enable_user(&req.network, &req.name)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn rename_user(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RenameUserRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    state
+        .lock_store()
+        .rename_user(&req.network, &req.name, &req.new_name)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<CreateUserRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, addr.ip(), &headers)?;
+    state.lock_store().delete_user(&req.network, &req.name)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -7,7 +7,14 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { IssueTokenResponse, NetworkInfo, NodeInfo, PathPolicy, RelayInfo } from "./types";
+import type {
+  IssueTokenResponse,
+  NetworkInfo,
+  NodeInfo,
+  PathPolicy,
+  RelayInfo,
+  UserInfo,
+} from "./types";
 
 /** 列表页轮询间隔 (FR-1 秒级可见; 后台轮询缺省关闭即页签隐藏时暂停)。 */
 const POLL_INTERVAL_MS = 3000;
@@ -124,18 +131,74 @@ export function useRevokeTokenMutation() {
   });
 }
 
-/** 创建用户 (属主标注载体, 令牌签发的前置)。 */
-export function useCreateUserMutation() {
-  return useMutation({
-    mutationFn: (input: { network: string; name: string }) =>
-      api<{ id: number }>("/api/admin/users", { json: input }),
+/** 当前网络用户 (属主) 列表。不轮询: 数据变化仅源于本页操作 (mutation 后已失效刷新),
+ * 无外部事件驱动; 覆盖全局关掉的聚焦重取, 多标签经切回标签页刷新同步。 */
+export function useUsersQuery(network: string | null) {
+  return useQuery({
+    queryKey: ["users", network],
+    queryFn: () => {
+      const net = requireNetwork(network);
+      return api<UserInfo[]>(`/api/admin/users?network=${encodeURIComponent(net)}`);
+    },
+    enabled: network !== null,
+    refetchOnWindowFocus: true,
   });
 }
 
-/** 禁用用户 (名下节点凭证即吊销、令牌失效)。 */
+/** 创建用户 (属主标注载体, 令牌签发的前置); 成功后失效用户列表。 */
+export function useCreateUserMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { network: string; name: string }) =>
+      api<{ id: number }>("/api/admin/users", { json: input }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
+  });
+}
+
+/** 禁用用户 (名下节点凭证即吊销、令牌失效); 成功后失效用户列表。 */
 export function useDisableUserMutation() {
+  const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
       api<{ ok: boolean }>("/api/admin/users/disable", { json: input }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
+  });
+}
+
+/** 启用用户 (禁用的逆操作, 名下令牌恢复可用); 成功后失效用户列表。 */
+export function useEnableUserMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { network: string; name: string }) =>
+      api<{ ok: boolean }>("/api/admin/users/enable", { json: input }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
+  });
+}
+
+/** 用户改名 (属主标注随 user_id 传播); 成功后失效用户与节点列表。 */
+export function useRenameUserMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { network: string; name: string; newName: string }) =>
+      api<{ ok: boolean }>("/api/admin/users/rename", {
+        json: { network: input.network, name: input.name, new_name: input.newName },
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["users"] });
+      void client.invalidateQueries({ queryKey: ["nodes"] });
+    },
+  });
+}
+
+/** 删除用户 (名下有未移除节点时服务端拒绝); 成功后失效用户与节点列表。 */
+export function useDeleteUserMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { network: string; name: string }) =>
+      api<{ ok: boolean }>("/api/admin/users/delete", { json: input }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["users"] });
+      void client.invalidateQueries({ queryKey: ["nodes"] });
+    },
   });
 }

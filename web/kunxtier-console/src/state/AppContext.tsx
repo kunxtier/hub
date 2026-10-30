@@ -1,12 +1,12 @@
 /*
- * Description: 会话与当前网络组的内存态 (无本地存储, 刷新即重登)
+ * Description: 会话与当前网络组状态 (会话令牌经 sessionStorage 标签页级续期, 管理数据不落本地)
  *
  * Author: qinzhenya
  * Created: 2026-10-27
  */
 
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
-import { api, setToken } from "@/api/client";
+import { api, getToken, setToken } from "@/api/client";
 import type { LoginResponse } from "@/api/types";
 
 /** 会话与网络组状态形状。 */
@@ -25,9 +25,9 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-/** 会话与网络组状态提供方 (仅内存, 不落任何本地存储)。 */
+/** 会话与网络组状态提供方 (刷新经 sessionStorage 恢复会话, 服务端过期由 401 兜底)。 */
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [authed, setAuthed] = useState(false);
+  const [authed, setAuthed] = useState(() => getToken() !== null);
   const [network, setNetworkState] = useState<string | null>(null);
 
   const login = useCallback(async (credential: string) => {

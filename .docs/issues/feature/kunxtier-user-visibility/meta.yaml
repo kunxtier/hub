@@ -1,0 +1,12 @@
+id: "FEAT-kunxtier-user-visibility-241031"
+type: "feature"
+slug: "kunxtier-user-visibility"
+title: "kunxtier 用户 (属主) 可见性"
+status: "closed"
+priority: "medium"
+owner: "SRV"
+tags:
+  - "kunxtier"
+  - "verify-finding"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"

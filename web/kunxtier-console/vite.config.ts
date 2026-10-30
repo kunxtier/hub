@@ -32,8 +32,8 @@ export default defineConfig({
   },
   build: {
     outDir: "../../rust/kunxtier/crates/kunxtier-relay/assets/console",
-    // 不清目录: 随 git 的占位页 placeholder.html 需在构建后存活,
-    // 陈旧哈希产物由 cargo make console-build 负责清理
-    emptyOutDir: false,
+    // 清目录: outDir 在项目根之外, vite 缺省不清, 显式打开;
+    // 目录内无随 git 的文件 (fresh clone 兜底页在 relay 代码内嵌)
+    emptyOutDir: true,
   },
 });

@@ -66,6 +66,15 @@ export interface LoginResponse {
   expires_at: number;
 }
 
+/** 用户条目 (GET /api/admin/users; 属主标注载体, 无属主登录)。 */
+export interface UserInfo {
+  network: string;
+  name: string;
+  disabled: boolean;
+  /** 创建时间 (unix 秒)。 */
+  created_at: number;
+}
+
 /** 令牌签发应答 (POST /api/admin/tokens); 明文仅此一次展示。 */
 export interface IssueTokenResponse {
   token_id: number;

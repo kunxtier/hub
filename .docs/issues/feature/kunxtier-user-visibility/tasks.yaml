@@ -1,0 +1,9 @@
+tasks:
+  - id: "T01"
+    title: "GET /api/admin/users 与 CLI admin user list (network 可选, 含 disabled 状态)"
+    status: "done"
+    owner: "SRV"
+  - id: "T02"
+    title: "控制台用户可见性: 令牌与用户页补用户列表区块 (状态 / 创建时间 / 行内禁用)"
+    status: "done"
+    owner: "FE"

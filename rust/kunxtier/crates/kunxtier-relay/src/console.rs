@@ -25,11 +25,35 @@ use kunxtier_core::protocol::ApiErrorBody;
 
 use crate::Error;
 
-/// 控制台构建产物 (未执行 console-build 时仅含随 git 的占位页 placeholder.html)。
-/// 资产随消费方走: cargo make console-build 将 web/kunxtier-console 的构建
-/// 产物输出覆盖至 assets/console/, 跨语言交接发生在构建链而非源码路径;
-/// 以文件表嵌入, 前端分包与命名策略不反向约束本侧。
+/// 控制台构建产物 (cargo make build 时由 vite 清空并输出, outDir 清理归 vite)。
+/// 资产随消费方走: 构建链将 web/kunxtier-console 的产物输出覆盖至 assets/console/,
+/// 跨语言交接发生在构建链而非源码路径; 以文件表嵌入, 前端分包与命名策略不反向约束本侧。
 static CONSOLE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/console");
+
+/// fresh clone (未构建前端) 的兜底占位页; 随二进制内嵌, 不依赖 assets 目录内容,
+/// vite 清空 outDir 不影响。
+const PLACEHOLDER_HTML: &str = r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kunxtier 控制台</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f5f6f8; color: #1f2328; display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+  main { text-align: center; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+  p { color: #57606a; font-size: 14px; margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>kunxtier 控制台</h1>
+<p>前端构建产物未嵌入。</p>
+<p>在 rust/kunxtier 执行 cargo make build 后重启进程即可。</p>
+</main>
+</body>
+</html>
+"#;
 
 /// 按扩展名定 Content-Type; 未识别类型按 octet-stream 兜底。
 fn mime_of(rel: &str) -> &'static str {
@@ -88,16 +112,16 @@ fn resolve(path: &str) -> ConsoleRoute {
     if last.contains('.') {
         return ConsoleRoute::NotFound;
     }
-    // 页面路径回落入口页; 未构建状态 (fresh clone) 回落占位页
-    match CONSOLE_DIR
-        .get_file("index.html")
-        .or_else(|| CONSOLE_DIR.get_file("placeholder.html"))
-    {
+    // 页面路径回落入口页; 未构建状态 (fresh clone) 回落内嵌占位页
+    match CONSOLE_DIR.get_file("index.html") {
         Some(file) => ConsoleRoute::Asset {
             rel: file.path(),
             contents: file.contents(),
         },
-        None => ConsoleRoute::NotFound,
+        None => ConsoleRoute::Asset {
+            rel: Path::new("placeholder.html"),
+            contents: PLACEHOLDER_HTML.as_bytes(),
+        },
     }
 }
 
@@ -273,8 +297,8 @@ mod tests {
 
     #[test]
     fn 解析_页面路径回落入口页() {
-        // 入口页随构建状态取 index.html (已构建) 或 placeholder.html (fresh clone),
-        // 断言对两种目录形态都成立, 不依赖本机是否跑过 console-build
+        // 入口页随构建状态取 index.html (已构建) 或内嵌占位页 (fresh clone),
+        // 断言对两种目录形态都成立, 不依赖本机是否跑过前端构建
         for path in ["/", "/nodes", "/nodes/a/b"] {
             let rel = rel_of(path).expect("页面路径应有入口页回落");
             assert!(

@@ -9,7 +9,7 @@
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
   - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时 + daemon 会话与本地 IPC / state 持久化 / 关键事件留痕与 status --verbose; 进度见 issue FEAT-kunxtier-core-runtime)
   - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / console / daemon / up / down / status)
-  - web/kunxtier-console (控制台前端): React + TS + Vite + Tailwind + shadcn, pnpm; 产物经 `cargo make console-build` 输出 relay assets/console 嵌入
+  - web/kunxtier-console (控制台前端): React + TS + Vite + Tailwind + shadcn, pnpm; 产物输出 relay assets/console 嵌入 (include_dir 编译期读入), `cargo make build` 一键完成: 编译前先构建前端 (失败即中断), 产物更新后需重启进程生效
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
 
 ## 常用命令
