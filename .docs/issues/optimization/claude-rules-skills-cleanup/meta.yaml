@@ -1,0 +1,12 @@
+id: "OPT-claude-rules-skills-cleanup-f68cac"
+type: "optimization"
+slug: "claude-rules-skills-cleanup"
+title: "修复 .claude rules 与 skills 审计发现的失效引用与残留"
+status: "done"
+priority: "medium"
+owner: "CORE"
+tags:
+  - "claude"
+  - "tooling"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"

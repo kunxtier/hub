@@ -1,0 +1,13 @@
+id: "BUG-kunxtier-runtime-storage-observability-8b167e"
+type: "bug"
+slug: "kunxtier-runtime-storage-observability"
+title: "relay 与 node 运行时合规整改 (存储落盘/可观测/热路径)"
+status: "open"
+priority: "high"
+owner: "CORE"
+tags:
+  - "kunxtier"
+  - "relay"
+  - "audit"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"
