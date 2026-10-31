@@ -31,7 +31,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [network, setNetworkState] = useState<string | null>(null);
 
   const login = useCallback(async (credential: string) => {
-    const resp = await api<LoginResponse>("/api/admin/login", {
+    const resp = await api<LoginResponse>("/api/v1/admin/login", {
       json: { credential },
     });
     setToken(resp.token);
@@ -40,7 +40,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     try {
-      await api("/api/admin/logout", { method: "POST" });
+      await api("/api/v1/admin/logout", { method: "POST" });
     } catch {
       // 会话已过期时服务端返回 401, 本地态照常清空, 不视为登出失败
     }

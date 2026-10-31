@@ -115,19 +115,19 @@ fn register_node(ctx: &Ctx, network: &str, user: &str, name: &str) -> String {
     let auth = format!("Bearer {}", ctx.admin);
     let _ = post(
         &ctx.agent,
-        &format!("{}/api/admin/users", ctx.base),
+        &format!("{}/api/v1/admin/users", ctx.base),
         Some(&auth),
         json!({"network": network, "name": user}),
     );
     let (_, tok) = post(
         &ctx.agent,
-        &format!("{}/api/admin/tokens", ctx.base),
+        &format!("{}/api/v1/admin/tokens", ctx.base),
         Some(&auth),
         json!({"network": network, "user": user}),
     );
     let (s, reg) = post(
         &ctx.agent,
-        &format!("{}/api/node/register", ctx.base),
+        &format!("{}/api/v1/node/register", ctx.base),
         None,
         json!({
             "token": tok["token"].as_str().unwrap(),
@@ -144,13 +144,14 @@ fn admin_auth(ctx: &Ctx) -> String {
 }
 
 async fn admin_nodes(ctx: &Ctx) -> Value {
-    let (s, nodes) = get(
+    let (s, page) = get(
         &ctx.agent,
-        &format!("{}/api/admin/nodes", ctx.base),
+        &format!("{}/api/v1/admin/nodes", ctx.base),
         Some(&admin_auth(ctx)),
     );
     assert_eq!(s, 200);
-    nodes
+    // 解包分页信封, 调用方沿用数组语义
+    page["items"].clone()
 }
 
 /// TLS (指纹固定) + WS 拨号。
@@ -400,7 +401,7 @@ async fn revocation_disconnects_and_rejects() {
     let _ = next_msg(&mut ws).await; // state 推送
     let (s, _) = post(
         &ctx.agent,
-        &format!("{}/api/admin/users/disable", ctx.base),
+        &format!("{}/api/v1/admin/users/disable", ctx.base),
         Some(&admin_auth(&ctx)),
         json!({"network": "default", "name": "alice"}),
     );
@@ -424,7 +425,7 @@ async fn revocation_disconnects_and_rejects() {
     let _ = next_msg(&mut ws_b).await; // state 推送
     let (s, _) = post(
         &ctx.agent,
-        &format!("{}/api/admin/nodes/remove", ctx.base),
+        &format!("{}/api/v1/admin/nodes/remove", ctx.base),
         Some(&admin_auth(&ctx)),
         json!({"network": "default", "name": "nb"}),
     );

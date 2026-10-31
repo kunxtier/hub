@@ -196,7 +196,7 @@ async fn conn_loop(
                     }
                     Some(Ok(WsMessage::Text(t))) => {
                         match serde_json::from_str::<ForwardServerMsg>(&t) {
-                            Ok(ForwardServerMsg::Closed { reason }) => {
+                            Ok(ForwardServerMsg::Closed { reason, .. }) => {
                                 return Some(format!("服务端断开: {reason}"));
                             }
                             Ok(_) => {}
@@ -302,7 +302,7 @@ async fn admit(ws: &mut WsStream, kind: &str, identity: &RelayIdentity) -> Resul
             heartbeat_interval_secs,
             ..
         }) => Ok(heartbeat_interval_secs),
-        Ok(ForwardServerMsg::Error { message }) => {
+        Ok(ForwardServerMsg::Error { message, .. }) => {
             Err(Error::Transport(format!("中继准入失败: {message}")))
         }
         other => Err(Error::Transport(format!("期望 bound, 实际: {other:?}"))),

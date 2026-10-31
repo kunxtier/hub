@@ -26,7 +26,7 @@ impl NetworkAction {
     pub fn execute(self, remote: &AdminRemote) -> Result<(), Fail> {
         match self {
             NetworkAction::List => {
-                let v = remote.get("/networks")?;
+                let v = remote.get_list("/networks")?;
                 print_result(&v);
             }
             NetworkAction::Create { name, cidr } => {

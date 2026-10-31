@@ -17,19 +17,37 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use kunxtier_core::protocol::{
-    PathPolicy, PeerPathReport, SignalClientMsg, SignalPeer, SignalServerMsg,
+    ApiErrorBody, PathPolicy, PeerPathReport, SignalClientMsg, SignalPeer, SignalServerMsg,
 };
 use kunxtier_core::time::elapsed_ms;
 use kunxtier_core::token;
 
 use crate::server::AppState;
 use crate::Result;
+
+/// WS 建连限速拒绝的统一 429 出口: JSON 错误体 + Retry-After (与 REST 面同形态)。
+pub(crate) fn ws_rate_limited(retry_after: u64) -> Response {
+    use axum::http::HeaderValue;
+    let body = ApiErrorBody {
+        code: "rate_limited".into(),
+        message: "建连过于频繁, 稍后再试".into(),
+        details: Vec::new(),
+        request_id: String::new(),
+    };
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, v);
+    }
+    resp
+}
 
 /// 心跳间隔与空闲超时 (AuthOk 下发; 2026-10-21 裁决: 10s / 30s)。
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 10;
@@ -98,6 +116,7 @@ impl OnlineRegistry {
             },
         ) {
             let _ = old.tx.try_send(SignalServerMsg::Closed {
+                code: "replaced".into(),
                 reason: "同名新连接已接入".into(),
             });
         }
@@ -192,6 +211,7 @@ impl OnlineRegistry {
         };
         if let Some(slot) = removed {
             let _ = slot.tx.try_send(SignalServerMsg::Closed {
+                code: "credential_revoked".into(),
                 reason: "凭证已被吊销".into(),
             });
             self.broadcast(
@@ -264,7 +284,7 @@ pub async fn ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     if !state.ws_limiter.check(addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, "信令建连过于频繁, 稍后再试").into_response();
+        return ws_rate_limited(state.ws_limiter.retry_after());
     }
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| session(socket, state, addr))
@@ -409,6 +429,7 @@ pub(crate) async fn authenticate(
         try_send(
             socket,
             &SignalServerMsg::AuthErr {
+                code: "auth_failed".into(),
                 message: "节点不存在或凭证已吊销".into(),
             },
         )
@@ -439,6 +460,7 @@ pub(crate) async fn authenticate(
         try_send(
             socket,
             &SignalServerMsg::AuthErr {
+                code: "auth_failed".into(),
                 message: "凭证应答不匹配".into(),
             },
         )
@@ -542,6 +564,7 @@ async fn handle_client_msg(
             send_soft(
                 sender,
                 &SignalServerMsg::Error {
+                    code: "invalid_message".into(),
                     message: "消息格式非法".into(),
                 },
             )
@@ -560,6 +583,7 @@ async fn handle_client_msg(
                 send_soft(
                     sender,
                     &SignalServerMsg::Error {
+                        code: "limit_exceeded".into(),
                         message: "候选地址数量或长度超限".into(),
                     },
                 )
@@ -584,6 +608,7 @@ async fn handle_client_msg(
                 send_soft(
                     sender,
                     &SignalServerMsg::Error {
+                        code: "limit_exceeded".into(),
                         message: "路径上报数量或节点名超限".into(),
                     },
                 )
@@ -607,6 +632,7 @@ async fn handle_client_msg(
                     sender,
                     &SignalServerMsg::SignalErr {
                         to,
+                        code: "signal_unreachable".into(),
                         message: "目标不在线".into(),
                     },
                 )
@@ -618,6 +644,7 @@ async fn handle_client_msg(
             send_soft(
                 sender,
                 &SignalServerMsg::Error {
+                    code: "already_authenticated".into(),
                     message: "已认证, 忽略重复认证消息".into(),
                 },
             )

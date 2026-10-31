@@ -13,7 +13,7 @@ use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use kunxtier_core::address;
-use kunxtier_core::protocol::{NetworkInfo, NodeInfo, PathPolicy, SignalPeer, UserInfo};
+use kunxtier_core::protocol::{NetworkInfo, NodeInfo, Page, PathPolicy, SignalPeer, UserInfo};
 use kunxtier_core::token::{self, Kind};
 
 use crate::{Error, Result};
@@ -40,11 +40,17 @@ fn now() -> i64 {
 }
 
 /// 名字约束 (网络 / 用户 / 节点共用): [a-zA-Z0-9_-]{1,32}。
-fn valid_name(s: &str) -> bool {
+/// server 侧列表过滤白名单复用同一取值约束。
+pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// 分页 offset 换算: page 从 1 起, 饱和运算不外溢。
+fn offset_of(page: u32, size: u32) -> u64 {
+    (page as u64).saturating_sub(1).saturating_mul(size as u64)
 }
 
 fn hash_b64(plain: &str) -> String {
@@ -251,7 +257,7 @@ impl Store {
                 rusqlite::Error::SqliteFailure(f, _)
                     if f.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    Error::Usage(format!("网络组已存在: {name}"))
+                    Error::Conflict(format!("网络组已存在: {name}"))
                 }
                 _ => Error::Store(e),
             })?;
@@ -270,12 +276,16 @@ impl Store {
         Ok(n as u32)
     }
 
-    pub fn list_networks(&self) -> Result<Vec<NetworkInfo>> {
-        let mut stmt = self
+    /// 网络组分页列表 (page 从 1 起); total 精确计数, 小表成本可忽略。
+    pub fn list_networks(&self, page: u32, size: u32) -> Result<Page<NetworkInfo>> {
+        let total: u64 = self
             .conn
-            .prepare("SELECT name, base, created_at FROM networks ORDER BY id")?;
+            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT name, base, created_at FROM networks ORDER BY id LIMIT ?1 OFFSET ?2",
+        )?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![size, offset_of(page, size)], |r| {
                 let name: String = r.get(0)?;
                 let base: u32 = r.get(1)?;
                 let created_at: i64 = r.get(2)?;
@@ -286,7 +296,12 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(Page {
+            items: rows,
+            page,
+            size,
+            total,
+        })
     }
 
     fn network_id(&self, name: &str) -> Result<(i64, u32)> {
@@ -297,7 +312,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
-            .ok_or_else(|| Error::Usage(format!("网络不存在: {name}")))
+            .ok_or_else(|| Error::NotFound(format!("网络不存在: {name}")))
     }
 
     // ---- 用户 ----
@@ -316,7 +331,7 @@ impl Store {
                 rusqlite::Error::SqliteFailure(f, _)
                     if f.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    Error::Usage(format!("用户已存在: 网络组 {network} 内 {name}"))
+                    Error::Conflict(format!("用户已存在: 网络组 {network} 内 {name}"))
                 }
                 _ => Error::Store(e),
             })?;
@@ -324,16 +339,27 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// 用户 (属主) 列表; network 为 None 时跨网络组全量。
-    pub fn list_users(&self, network: Option<&str>) -> Result<Vec<UserInfo>> {
+    /// 用户 (属主) 分页列表; network 为 None 时跨网络组全量。
+    pub fn list_users(
+        &self,
+        network: Option<&str>,
+        page: u32,
+        size: u32,
+    ) -> Result<Page<UserInfo>> {
+        let total: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM users u JOIN networks nw ON nw.id = u.network_id
+             WHERE (?1 IS NULL OR nw.name = ?1)",
+            params![network],
+            |r| r.get(0),
+        )?;
         let mut stmt = self.conn.prepare(
             "SELECT nw.name, u.name, u.disabled, u.created_at
              FROM users u JOIN networks nw ON nw.id = u.network_id
              WHERE (?1 IS NULL OR nw.name = ?1)
-             ORDER BY u.network_id, u.id",
+             ORDER BY u.network_id, u.id LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt
-            .query_map(params![network], |r| {
+            .query_map(params![network, size, offset_of(page, size)], |r| {
                 Ok(UserInfo {
                     network: r.get(0)?,
                     name: r.get(1)?,
@@ -342,7 +368,12 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(Page {
+            items: rows,
+            page,
+            size,
+            total,
+        })
     }
 
     /// 禁用用户: 其名下令牌签发被拒 (存量节点凭证的实时吊销随信令阶段接入)。
@@ -354,7 +385,7 @@ impl Store {
             params![nid, name],
         )?;
         if n == 0 {
-            return Err(Error::Usage(format!("用户不存在或已禁用: {name}")));
+            return Err(Error::NotFound(format!("用户不存在或已禁用: {name}")));
         }
         tracing::info!(network, user = name, "用户禁用");
         Ok(())
@@ -369,7 +400,7 @@ impl Store {
             params![nid, name],
         )?;
         if n == 0 {
-            return Err(Error::Usage(format!("用户不存在或未禁用: {name}")));
+            return Err(Error::NotFound(format!("用户不存在或未禁用: {name}")));
         }
         tracing::info!(network, user = name, "用户启用");
         Ok(())
@@ -391,12 +422,12 @@ impl Store {
                 rusqlite::Error::SqliteFailure(f, _)
                     if f.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    Error::Usage(format!("用户已存在: 网络组 {network} 内 {new_name}"))
+                    Error::Conflict(format!("用户已存在: 网络组 {network} 内 {new_name}"))
                 }
                 _ => Error::Store(e),
             })?;
         if n == 0 {
-            return Err(Error::Usage(format!("用户不存在: {name}")));
+            return Err(Error::NotFound(format!("用户不存在: {name}")));
         }
         tracing::info!(network, from = name, to = new_name, "用户改名");
         Ok(())
@@ -408,7 +439,7 @@ impl Store {
         let (nid, _) = self.network_id(network)?;
         let uid = match self.user_row(nid, name)? {
             Some((id, _)) => id,
-            None => return Err(Error::Usage(format!("用户不存在: {name}"))),
+            None => return Err(Error::NotFound(format!("用户不存在: {name}"))),
         };
         let active: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM nodes WHERE user_id = ?1 AND removed_at IS NULL",
@@ -416,7 +447,7 @@ impl Store {
             |r| r.get(0),
         )?;
         if active > 0 {
-            return Err(Error::Usage(format!(
+            return Err(Error::Conflict(format!(
                 "用户 {name} 名下仍有 {active} 个未移除节点, 先移除节点再删除"
             )));
         }
@@ -467,8 +498,8 @@ impl Store {
         let uid = match user {
             Some(u) => match self.user_row(nid, u)? {
                 Some((id, false)) => Some(id),
-                Some((_, true)) => return Err(Error::Usage(format!("用户已禁用: {u}"))),
-                None => return Err(Error::Usage(format!("用户不存在: {u}"))),
+                Some((_, true)) => return Err(Error::Conflict(format!("用户已禁用: {u}"))),
+                None => return Err(Error::NotFound(format!("用户不存在: {u}"))),
             },
             None => {
                 if kind == "node" {
@@ -541,7 +572,7 @@ impl Store {
             params![id, now()],
         )?;
         if n == 0 {
-            return Err(Error::Usage(format!("令牌不存在或已不可撤销: {id}")));
+            return Err(Error::NotFound(format!("令牌不存在或已不可撤销: {id}")));
         }
         tracing::info!(token_id = id, "令牌撤销");
         Ok(kind.unwrap_or_default())
@@ -590,18 +621,20 @@ impl Store {
             )
             .optional()?;
         let (tok_id, kind, nid, uid, expires, used, revoked) =
-            tok.ok_or_else(|| Error::Usage("令牌不存在或已失效".into()))?;
+            tok.ok_or_else(|| Error::TokenRejected("令牌不存在或已失效".into()))?;
         if kind != "node" {
-            return Err(Error::Usage("令牌类型不匹配, 期望节点注册令牌".into()));
+            return Err(Error::TokenRejected(
+                "令牌类型不匹配, 期望节点注册令牌".into(),
+            ));
         }
         if used.is_some() {
-            return Err(Error::Usage("令牌已被使用".into()));
+            return Err(Error::TokenRejected("令牌已被使用".into()));
         }
         if revoked.is_some() {
-            return Err(Error::Usage("令牌已撤销".into()));
+            return Err(Error::TokenRejected("令牌已撤销".into()));
         }
         if expires <= now() {
-            return Err(Error::Usage("令牌已过期".into()));
+            return Err(Error::TokenRejected("令牌已过期".into()));
         }
         if let Some(uid) = uid {
             let disabled: Option<i64> = tx
@@ -613,7 +646,7 @@ impl Store {
                 .optional()?;
             match disabled {
                 Some(0) => {}
-                _ => return Err(Error::Usage("所属用户已禁用或不存在".into())),
+                _ => return Err(Error::Conflict("所属用户已禁用或不存在".into())),
             }
         }
         let (base, next_ip): (u32, u32) = tx.query_row(
@@ -649,7 +682,7 @@ impl Store {
             rusqlite::Error::SqliteFailure(f, _)
                 if f.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Error::Usage(format!("节点名已存在: {name}"))
+                Error::Conflict(format!("节点名已存在: {name}"))
             }
             _ => Error::Store(e),
         })?;
@@ -671,38 +704,50 @@ impl Store {
             params![nid, name, now()],
         )?;
         if n == 0 {
-            return Err(Error::Usage(format!("节点不存在: {name}")));
+            return Err(Error::NotFound(format!("节点不存在: {name}")));
         }
         tracing::info!(network, node = name, "节点移除 (凭证随之失效)");
         Ok(())
     }
 
-    pub fn list_nodes(&self, network: Option<&str>) -> Result<Vec<NodeInfo>> {
-        const SQL_ALL: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name, n.policy
-             FROM nodes n
+    /// 节点分页列表; network / owner 为 None 时不过滤 (owner 过滤下推 SQL,
+    /// 保证分页语义: 先过滤后截页, 不在内存二次筛)。
+    pub fn list_nodes(
+        &self,
+        network: Option<&str>,
+        owner: Option<&str>,
+        page: u32,
+        size: u32,
+    ) -> Result<Page<NodeInfo>> {
+        const COND: &str = "n.removed_at IS NULL
+             AND (?1 IS NULL OR nw.name = ?1)
+             AND (?2 IS NULL OR u.name = ?2)";
+        const BODY: &str = "FROM nodes n
              JOIN networks nw ON nw.id = n.network_id
              LEFT JOIN users u ON u.id = n.user_id
-             WHERE n.removed_at IS NULL
-             ORDER BY n.id";
-        const SQL_BY_NETWORK: &str = "SELECT n.name, n.ip, u.name, n.created_at, nw.name, n.policy
-             FROM nodes n
-             JOIN networks nw ON nw.id = n.network_id
-             LEFT JOIN users u ON u.id = n.user_id
-             WHERE n.removed_at IS NULL AND nw.name = ?1
-             ORDER BY n.id";
-        let mut stmt = self.conn.prepare(match network {
-            Some(_) => SQL_BY_NETWORK,
-            None => SQL_ALL,
-        })?;
-        let rows = match network {
-            Some(n) => stmt
-                .query_map([n], node_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-            None => stmt
-                .query_map([], node_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-        };
-        Ok(rows)
+             WHERE";
+        let total: u64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) {BODY} {COND}"),
+            params![network, owner],
+            |r| r.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT n.name, n.ip, u.name, n.created_at, nw.name, n.policy
+             {BODY} {COND}
+             ORDER BY n.id LIMIT ?3 OFFSET ?4"
+        ))?;
+        let rows = stmt
+            .query_map(
+                params![network, owner, size, offset_of(page, size)],
+                node_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Page {
+            items: rows,
+            page,
+            size,
+            total,
+        })
     }
 
     // ---- 信令认证与节点表 ----
@@ -816,6 +861,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kunxtier_core::protocol::PAGE_SIZE_MAX;
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -852,19 +898,19 @@ mod tests {
 
     #[test]
     fn 重名创建映射为业务错误而非内部错误() {
-        // 唯一约束冲突出口为 Usage (400 业务提示), 不落 500 内部错误
+        // 唯一约束冲突出口为 Conflict (409 业务提示), 不落 500 内部错误
         let (_d, s) = store();
         default_network(&s);
         s.create_user("default", "alice").unwrap();
 
         let err = s.create_user("default", "alice").unwrap_err();
-        assert!(matches!(err, Error::Usage(_)), "实际: {err:?}");
+        assert!(matches!(err, Error::Conflict(_)), "实际: {err:?}");
         assert!(err.to_string().contains("用户已存在"), "实际: {err}");
 
         let err = s
             .create_network("default", address::nth_network_base(0).unwrap())
             .unwrap_err();
-        assert!(matches!(err, Error::Usage(_)), "实际: {err:?}");
+        assert!(matches!(err, Error::Conflict(_)), "实际: {err:?}");
         assert!(err.to_string().contains("网络组已存在"), "实际: {err}");
     }
 
@@ -887,13 +933,16 @@ mod tests {
         s.create_user("net2", "bob").unwrap();
         s.disable_user("net2", "bob").unwrap();
 
-        let all = s.list_users(None).unwrap();
+        let all = s.list_users(None, 1, PAGE_SIZE_MAX).unwrap().items;
         assert_eq!(all.len(), 2);
         let bob = all.iter().find(|u| u.name == "bob").unwrap();
         assert_eq!(bob.network, "net2");
         assert!(bob.disabled);
 
-        let only = s.list_users(Some("default")).unwrap();
+        let only = s
+            .list_users(Some("default"), 1, PAGE_SIZE_MAX)
+            .unwrap()
+            .items;
         assert_eq!(only.len(), 1);
         assert_eq!(only[0].name, "alice");
         assert!(!only[0].disabled);
@@ -908,7 +957,12 @@ mod tests {
         // 禁用 / 启用往返
         s.disable_user("default", "alice").unwrap();
         s.enable_user("default", "alice").unwrap();
-        assert!(!s.list_users(Some("default")).unwrap()[0].disabled);
+        assert!(
+            !s.list_users(Some("default"), 1, PAGE_SIZE_MAX)
+                .unwrap()
+                .items[0]
+                .disabled
+        );
 
         // 改名: 冲突拒绝, 成功后节点属主标注随之传播
         s.create_user("default", "bob").unwrap();
@@ -919,7 +973,10 @@ mod tests {
             .unwrap();
         s.consume_node_token(&t, "laptop", &wg_key()).unwrap();
         s.rename_user("default", "alice", "alice2").unwrap();
-        let nodes = s.list_nodes(Some("default")).unwrap();
+        let nodes = s
+            .list_nodes(Some("default"), None, 1, PAGE_SIZE_MAX)
+            .unwrap()
+            .items;
         assert_eq!(nodes[0].owner.as_deref(), Some("alice2"));
 
         // 名下有未移除节点时拒绝删除; 移除节点后可删, 用户从列表消失
@@ -927,7 +984,10 @@ mod tests {
         assert!(err.to_string().contains("未移除节点"), "实际: {err}");
         s.remove_node("default", "laptop").unwrap();
         s.delete_user("default", "alice2").unwrap();
-        let users = s.list_users(Some("default")).unwrap();
+        let users = s
+            .list_users(Some("default"), 1, PAGE_SIZE_MAX)
+            .unwrap()
+            .items;
         assert!(users.iter().all(|u| u.name != "alice2"));
     }
 
@@ -970,7 +1030,10 @@ mod tests {
             Some(PathPolicy::ForceRelay)
         );
         assert_eq!(
-            s.list_nodes(Some("default")).unwrap()[0].policy,
+            s.list_nodes(Some("default"), None, 1, PAGE_SIZE_MAX)
+                .unwrap()
+                .items[0]
+                .policy,
             PathPolicy::ForceRelay
         );
         assert!(s
@@ -1068,7 +1131,11 @@ mod tests {
         let (_, t) = s.issue_token("default", Some("a"), "node", 3600).unwrap();
         s.consume_node_token(&t, "laptop", &wg_key()).unwrap();
         s.remove_node("default", "laptop").unwrap();
-        assert!(s.list_nodes(Some("default")).unwrap().is_empty());
+        assert!(s
+            .list_nodes(Some("default"), None, 1, PAGE_SIZE_MAX)
+            .unwrap()
+            .items
+            .is_empty());
         assert!(s.remove_node("default", "laptop").is_err());
         // 同名可再注册 (新身份), IP 不复用 (FR-17)
         let (_, t2) = s.issue_token("default", Some("a"), "node", 3600).unwrap();
@@ -1106,8 +1173,22 @@ mod tests {
         s.backup_to(&out).unwrap();
         // 恢复侧通过公开查询接口核对 (只读)
         let restored = Store::open(&out).unwrap();
-        assert_eq!(restored.list_networks().unwrap().len(), 1);
-        assert_eq!(restored.list_nodes(None).unwrap().len(), 1);
+        assert_eq!(
+            restored
+                .list_networks(1, PAGE_SIZE_MAX)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(
+            restored
+                .list_nodes(None, None, 1, PAGE_SIZE_MAX)
+                .unwrap()
+                .items
+                .len(),
+            1,
+        );
     }
 
     #[test]

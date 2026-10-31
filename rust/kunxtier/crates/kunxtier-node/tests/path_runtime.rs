@@ -134,19 +134,19 @@ fn register_node(ctx: &Ctx, name: &str, identity: &WgIdentity) -> (String, Strin
     let auth = format!("Bearer {}", ctx.admin);
     let _ = post(
         &ctx.agent,
-        &format!("{}/api/admin/users", ctx.base),
+        &format!("{}/api/v1/admin/users", ctx.base),
         Some(&auth),
         json!({"network": "default", "name": "alice"}),
     );
     let (_, tok) = post(
         &ctx.agent,
-        &format!("{}/api/admin/tokens", ctx.base),
+        &format!("{}/api/v1/admin/tokens", ctx.base),
         Some(&auth),
         json!({"network": "default", "user": "alice"}),
     );
     let (s, reg) = post(
         &ctx.agent,
-        &format!("{}/api/node/register", ctx.base),
+        &format!("{}/api/v1/node/register", ctx.base),
         None,
         json!({
             "token": tok["token"].as_str().unwrap(),
@@ -165,7 +165,7 @@ fn set_policy(ctx: &Ctx, name: &str, policy: &str) {
     let auth = format!("Bearer {}", ctx.admin);
     let (s, v) = post(
         &ctx.agent,
-        &format!("{}/api/admin/nodes/policy", ctx.base),
+        &format!("{}/api/v1/admin/nodes/policy", ctx.base),
         Some(&auth),
         json!({"network": "default", "name": name, "policy": policy}),
     );
@@ -264,7 +264,7 @@ async fn wait_admin_path(
     timeout: Duration,
 ) {
     let auth = format!("Bearer {}", ctx.admin);
-    let url = format!("{}/api/admin/nodes", ctx.base);
+    let url = format!("{}/api/v1/admin/nodes", ctx.base);
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let found = ctx
@@ -274,7 +274,7 @@ async fn wait_admin_path(
             .call()
             .ok()
             .and_then(|r| r.into_json::<serde_json::Value>().ok())
-            .and_then(|nodes| nodes.as_array().cloned())
+            .and_then(|page| page["items"].as_array().cloned())
             .and_then(|nodes| nodes.into_iter().find(|n| n["name"] == node));
         if let Some(n) = found {
             if let Some(paths) = n["paths"].as_array() {

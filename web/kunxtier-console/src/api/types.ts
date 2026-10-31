@@ -1,11 +1,23 @@
 /*
- * Description: admin API 契约类型投影 (权威定义见 kunxtier-core src/protocol.rs, 字段命名与其一致)
+ * Description: admin API 契约类型投影 (权威定义与快照对照见 kunxtier-core src/protocol.rs 的 rest_contract_snapshots 测试)
  *
  * Author: qinzhenya
  * Created: 2026-10-27
  */
 
-/** 网络组条目 (GET /api/admin/networks)。 */
+/** 列表响应信封 (page 式分页; 权威定义见 kunxtier-core protocol.rs Page)。 */
+export interface Page<T> {
+  /** 当前页条目。 */
+  items: T[];
+  /** 页码, 从 1 起。 */
+  page: number;
+  /** 页大小 (契约上限 200)。 */
+  size: number;
+  /** 总条目数 (个人规模小表精确计数)。 */
+  total: number;
+}
+
+/** 网络组条目 (GET /api/v1/admin/networks)。 */
 export interface NetworkInfo {
   /** 网络组名 (切换器与各页面的网络维度键)。 */
   name: string;
@@ -28,7 +40,7 @@ export interface PeerPathReport {
 /** 路径策略: auto 自动打洞回落, force_relay 强制中继。 */
 export type PathPolicy = "auto" | "force_relay";
 
-/** 节点条目 (GET /api/admin/nodes; 在线态/候选地址/版本/路径由信令注册表合并)。 */
+/** 节点条目 (GET /api/v1/admin/nodes; 在线态/候选地址/版本/路径由信令注册表合并)。 */
 export interface NodeInfo {
   network: string;
   name: string;
@@ -46,7 +58,7 @@ export interface NodeInfo {
   paths: PeerPathReport[];
 }
 
-/** 中继汇总条目 (GET /api/admin/relays)。 */
+/** 中继汇总条目 (GET /api/v1/admin/relays)。 */
 export interface RelayInfo {
   /** 对外地址 host:port。 */
   addr: string;
@@ -58,7 +70,7 @@ export interface RelayInfo {
   nodes: number;
 }
 
-/** 登录应答 (POST /api/admin/login)。 */
+/** 登录应答 (POST /api/v1/admin/login)。 */
 export interface LoginResponse {
   /** 会话令牌 (Bearer, 服务端内存态, relay 重启即失效)。 */
   token: string;
@@ -66,7 +78,7 @@ export interface LoginResponse {
   expires_at: number;
 }
 
-/** 用户条目 (GET /api/admin/users; 属主标注载体, 无属主登录)。 */
+/** 用户条目 (GET /api/v1/admin/users; 属主标注载体, 无属主登录)。 */
 export interface UserInfo {
   network: string;
   name: string;
@@ -75,7 +87,7 @@ export interface UserInfo {
   created_at: number;
 }
 
-/** 令牌签发应答 (POST /api/admin/tokens); 明文仅此一次展示。 */
+/** 令牌签发应答 (POST /api/v1/admin/tokens); 明文仅此一次展示。 */
 export interface IssueTokenResponse {
   token_id: number;
   token: string;

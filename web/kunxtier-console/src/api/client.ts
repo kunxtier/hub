@@ -8,9 +8,9 @@
 /** 401 统一事件名: App 层监听后跳转登录页。 */
 export const UNAUTHORIZED_EVENT = "kunxtier:unauthorized";
 
-/** 后端错误体投影 (kunxtier-relay server.rs ApiError / ApiErrorBody)。 */
+/** 后端错误体投影 (kunxtier-core protocol.rs ApiErrorBody)。 */
 interface ApiErrorShape {
-  error: string;
+  code: string;
   message: string;
 }
 
@@ -100,7 +100,7 @@ export async function api<T>(path: string, init: ApiRequestInit = {}): Promise<T
     const body = (await resp.json().catch(() => null)) as ApiErrorShape | null;
     throw new ApiRequestError(
       resp.status,
-      body?.error ?? "error",
+      body?.code ?? "error",
       body?.message ?? `请求失败 (${resp.status})`,
     );
   }

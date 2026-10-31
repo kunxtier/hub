@@ -55,8 +55,8 @@ impl NodeAction {
         match self {
             NodeAction::List { network } => {
                 let v = match network {
-                    Some(n) => remote.get(&format!("/nodes?network={n}"))?,
-                    None => remote.get("/nodes")?,
+                    Some(n) => remote.get_list(&format!("/nodes?network={n}"))?,
+                    None => remote.get_list("/nodes")?,
                 };
                 print_result(&v);
             }

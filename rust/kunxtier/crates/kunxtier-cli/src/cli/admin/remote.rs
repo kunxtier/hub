@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use kunxtier_core::protocol::PAGE_SIZE_MAX;
 use kunxtier_core::tls::pinning_agent;
 
 use crate::cli::error::Fail;
@@ -20,7 +21,18 @@ impl AdminRemote {
         Self {
             agent: pinning_agent(fingerprint),
             auth: format!("Bearer {credential}"),
-            base: format!("{}/api/admin", server.trim_end_matches('/')),
+            base: format!("{}/api/v1/admin", server.trim_end_matches('/')),
+        }
+    }
+
+    /// 列表查询: 按契约上限拉取 (个人规模单页足够) 并解包信封 items。
+    pub fn get_list(&self, path: &str) -> Result<Value, Fail> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        // 与服务端契约上限同源 (protocol.rs 常量), 上限调整时无需同步此处
+        let v = self.get(&format!("{path}{sep}size={PAGE_SIZE_MAX}"))?;
+        match v.get("items").and_then(|i| i.as_array()) {
+            Some(items) => Ok(Value::Array(items.clone())),
+            None => Err(Fail::runtime("列表响应缺少 items 字段".to_string())),
         }
     }
 
@@ -52,7 +64,8 @@ fn json_or_error(resp: ureq::Response) -> Result<Value, Fail> {
         Ok(body)
     } else {
         let msg = body["message"].as_str().unwrap_or("未知错误").to_string();
-        Err(Fail::runtime(format!("HTTP {status}: {msg}")))
+        let code = body["code"].as_str().unwrap_or("unknown");
+        Err(Fail::runtime(format!("HTTP {status} [{code}]: {msg}")))
     }
 }
 

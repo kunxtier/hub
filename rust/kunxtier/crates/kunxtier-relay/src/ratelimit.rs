@@ -30,6 +30,12 @@ impl RateLimiter {
         self.check_at(ip, now_secs())
     }
 
+    /// 固定窗口剩余秒数: 429 Retry-After 用 (窗口边界整点重置)。
+    pub fn retry_after(&self) -> u64 {
+        let w = self.window.as_secs().max(1);
+        w - (now_secs() % w)
+    }
+
     /// 以给定时间 (unix 秒) 判定, 供测试注入时钟。
     pub fn check_at(&self, ip: IpAddr, now: u64) -> bool {
         let w = self.window.as_secs().max(1);

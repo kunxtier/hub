@@ -91,7 +91,7 @@ async fn admin_session_login_logout_and_relays() {
     // 错误凭证 → 401 (且不签发会话)
     let (s, _) = post(
         &agent,
-        &format!("{base}/api/admin/login"),
+        &format!("{base}/api/v1/admin/login"),
         None,
         json!({"credential": "kxt_admin_wrong"}),
     );
@@ -100,7 +100,7 @@ async fn admin_session_login_logout_and_relays() {
     // 正确凭证 → 会话令牌
     let (s, body) = post(
         &agent,
-        &format!("{base}/api/admin/login"),
+        &format!("{base}/api/v1/admin/login"),
         None,
         json!({"credential": admin}),
     );
@@ -111,20 +111,24 @@ async fn admin_session_login_logout_and_relays() {
     let auth = format!("Bearer {token}");
 
     // 会话可调用 admin API; 会话与凭证双轨 (两者都通)
-    let (s, _) = get(&agent, &format!("{base}/api/admin/networks"), Some(&auth));
+    let (s, _) = get(
+        &agent,
+        &format!("{base}/api/v1/admin/networks"),
+        Some(&auth),
+    );
     assert_eq!(s, 200, "会话令牌应可用");
     let cred_auth = format!("Bearer {admin}");
     let (s, _) = get(
         &agent,
-        &format!("{base}/api/admin/networks"),
+        &format!("{base}/api/v1/admin/networks"),
         Some(&cred_auth),
     );
     assert_eq!(s, 200, "admin 凭证应仍可用");
 
     // relays 汇总: 无卫星时仅内置条目, 在线端点数 0
-    let (s, body) = get(&agent, &format!("{base}/api/admin/relays"), Some(&auth));
+    let (s, body) = get(&agent, &format!("{base}/api/v1/admin/relays"), Some(&auth));
     assert_eq!(s, 200);
-    let relays = body.as_array().unwrap();
+    let relays = body["items"].as_array().unwrap();
     assert_eq!(relays.len(), 1);
     assert_eq!(relays[0]["kind"], "core");
     assert_eq!(relays[0]["nodes"], 0);
@@ -141,12 +145,16 @@ async fn admin_session_login_logout_and_relays() {
     // 登出 → 原会话失效
     let (s, _) = post(
         &agent,
-        &format!("{base}/api/admin/logout"),
+        &format!("{base}/api/v1/admin/logout"),
         Some(&auth),
         json!({}),
     );
     assert_eq!(s, 200);
-    let (s, _) = get(&agent, &format!("{base}/api/admin/networks"), Some(&auth));
+    let (s, _) = get(
+        &agent,
+        &format!("{base}/api/v1/admin/networks"),
+        Some(&auth),
+    );
     assert_eq!(s, 401, "登出后会话应失效");
 }
 
@@ -163,14 +171,14 @@ async fn nodes_owner_filter_and_merged_fields() {
     for owner in ["alice", "bob"] {
         let (s, _) = post(
             &agent,
-            &format!("{base}/api/admin/users"),
+            &format!("{base}/api/v1/admin/users"),
             Some(&auth),
             json!({"network": "default", "name": owner}),
         );
         assert_eq!(s, 200);
         let (s, body) = post(
             &agent,
-            &format!("{base}/api/admin/tokens"),
+            &format!("{base}/api/v1/admin/tokens"),
             Some(&auth),
             json!({"network": "default", "user": owner, "kind": "node"}),
         );
@@ -178,7 +186,7 @@ async fn nodes_owner_filter_and_merged_fields() {
         let token = body["token"].as_str().unwrap();
         let (s, _) = post(
             &agent,
-            &format!("{base}/api/node/register"),
+            &format!("{base}/api/v1/node/register"),
             None,
             json!({"token": token, "name": format!("node-{owner}"), "wg_public_key": wg_key_b64()}),
         );
@@ -188,11 +196,11 @@ async fn nodes_owner_filter_and_merged_fields() {
     // 属主过滤: 只见 alice 的节点
     let (s, body) = get(
         &agent,
-        &format!("{base}/api/admin/nodes?owner=alice"),
+        &format!("{base}/api/v1/admin/nodes?owner=alice"),
         Some(&auth),
     );
     assert_eq!(s, 200);
-    let nodes = body.as_array().unwrap();
+    let nodes = body["items"].as_array().unwrap();
     assert_eq!(nodes.len(), 1, "属主过滤应只剩 alice 的节点: {body}");
     assert_eq!(nodes[0]["name"], "node-alice");
     assert_eq!(nodes[0]["owner"], "alice");
@@ -202,12 +210,12 @@ async fn nodes_owner_filter_and_merged_fields() {
     assert!(nodes[0]["version"].is_null());
 
     // 无过滤: 全量两节点
-    let (s, body) = get(&agent, &format!("{base}/api/admin/nodes"), Some(&auth));
+    let (s, body) = get(&agent, &format!("{base}/api/v1/admin/nodes"), Some(&auth));
     assert_eq!(s, 200);
-    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
 
     // 会话过期前 admin 凭证与会话双轨由上一用例覆盖; 未认证拒绝
-    let (s, _) = get(&agent, &format!("{base}/api/admin/nodes"), None);
+    let (s, _) = get(&agent, &format!("{base}/api/v1/admin/nodes"), None);
     assert_eq!(s, 401);
 }
 
@@ -245,7 +253,7 @@ async fn local_console_serves_page_and_proxies_api() {
 
     // 反代: 经本地端口登录核心 (指纹校验发生在反代层), 会话可查询 admin API
     let resp = agent
-        .post(&format!("{base}/api/admin/login"))
+        .post(&format!("{base}/api/v1/admin/login"))
         .send_json(json!({"credential": admin}))
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -253,14 +261,17 @@ async fn local_console_serves_page_and_proxies_api() {
     let token = body["token"].as_str().unwrap().to_string();
     assert!(token.starts_with("kxt_ses_"));
     let resp = agent
-        .get(&format!("{base}/api/admin/networks"))
+        .get(&format!("{base}/api/v1/admin/networks"))
         .set("Authorization", &format!("Bearer {token}"))
         .call()
         .unwrap();
     assert_eq!(resp.status(), 200);
 
     // 未匹配的 API 路径经反代回核心, 得 404 JSON 而非页面
-    match agent.get(&format!("{base}/api/admin/nonexistent")).call() {
+    match agent
+        .get(&format!("{base}/api/v1/admin/nonexistent"))
+        .call()
+    {
         Err(ureq::Error::Status(404, _)) => {}
         other => panic!("期望 404, 实际: {other:?}"),
     }

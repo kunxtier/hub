@@ -79,19 +79,19 @@ fn register_node(ctx: &Ctx, name: &str) -> (String, String) {
     let auth = format!("Bearer {}", ctx.admin);
     let _ = post(
         &ctx.agent,
-        &format!("{}/api/admin/users", ctx.base),
+        &format!("{}/api/v1/admin/users", ctx.base),
         Some(&auth),
         json!({"network": "default", "name": "alice"}),
     );
     let (_, tok) = post(
         &ctx.agent,
-        &format!("{}/api/admin/tokens", ctx.base),
+        &format!("{}/api/v1/admin/tokens", ctx.base),
         Some(&auth),
         json!({"network": "default", "user": "alice"}),
     );
     let (s, reg) = post(
         &ctx.agent,
-        &format!("{}/api/node/register", ctx.base),
+        &format!("{}/api/v1/node/register", ctx.base),
         None,
         json!({
             "token": tok["token"].as_str().unwrap(),
@@ -110,7 +110,7 @@ fn register_node(ctx: &Ctx, name: &str) -> (String, String) {
 fn issue_relay_token(ctx: &Ctx) -> String {
     let (_, tok) = post(
         &ctx.agent,
-        &format!("{}/api/admin/tokens", ctx.base),
+        &format!("{}/api/v1/admin/tokens", ctx.base),
         Some(&format!("Bearer {}", ctx.admin)),
         json!({"network": "default", "kind": "relay", "ttl_secs": 600}),
     );
@@ -418,7 +418,7 @@ async fn satellite_invalid_token_not_registered() {
         let auth = format!("Bearer {}", ctx.admin);
         let (_, tok) = post(
             &ctx.agent,
-            &format!("{}/api/admin/tokens", ctx.base),
+            &format!("{}/api/v1/admin/tokens", ctx.base),
             Some(&auth),
             json!({"network": "default", "user": "alice"}),
         );

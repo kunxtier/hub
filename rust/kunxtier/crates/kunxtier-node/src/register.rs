@@ -1,4 +1,4 @@
-//! Description: 节点一次性令牌注册客户端 (核心 /api/node/register)。
+//! Description: 节点一次性令牌注册客户端 (核心 /api/v1/node/register)。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-26
@@ -39,7 +39,7 @@ pub fn register(
 ) -> Result<RegisterOutcome> {
     let agent = kunxtier_core::tls::pinning_agent(fingerprint);
     let host = core.trim_start_matches("https://").trim_end_matches('/');
-    let url = format!("https://{host}/api/node/register");
+    let url = format!("https://{host}/api/v1/node/register");
     let resp = match agent.post(&url).send_json(serde_json::json!({
         "token": token,
         "name": name,

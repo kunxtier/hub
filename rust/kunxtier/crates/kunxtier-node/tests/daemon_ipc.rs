@@ -145,13 +145,13 @@ fn issue_node_token(core: &Core) -> String {
     let auth = format!("Bearer {}", core.admin);
     let _ = post(
         &core.agent,
-        &format!("{}/api/admin/users", core.base),
+        &format!("{}/api/v1/admin/users", core.base),
         Some(&auth),
         json!({"network": "default", "name": "alice"}),
     );
     let (_, token) = post(
         &core.agent,
-        &format!("{}/api/admin/tokens", core.base),
+        &format!("{}/api/v1/admin/tokens", core.base),
         Some(&auth),
         json!({"network": "default", "user": "alice"}),
     );
@@ -162,7 +162,7 @@ fn remove_node(core: &Core, name: &str) {
     let auth = format!("Bearer {}", core.admin);
     let (s, v) = post(
         &core.agent,
-        &format!("{}/api/admin/nodes/remove", core.base),
+        &format!("{}/api/v1/admin/nodes/remove", core.base),
         Some(&auth),
         json!({"network": "default", "name": name}),
     );

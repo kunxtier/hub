@@ -140,8 +140,10 @@ fn not_found(path: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(ApiErrorBody {
-            error: "not_found".into(),
+            code: "not_found".into(),
             message: format!("路径不存在: {path}"),
+            details: Vec::new(),
+            request_id: String::new(),
         }),
     )
         .into_response()
@@ -173,6 +175,8 @@ pub async fn start_local(
     let core = options.core;
     let app = Router::new()
         .route("/api/{*path}", any(proxy_api))
+        // 与核心同源的请求上下文 (request_id / 访问日志), 本地控制台不留观测盲区
+        .layer(axum::middleware::from_fn(crate::server::request_context))
         .fallback_service(get(serve_console))
         .with_state((agent, core));
     let listener = std::net::TcpListener::bind(options.listen)
@@ -237,13 +241,34 @@ async fn proxy_api(
     .await;
     match outcome {
         Ok(Ok(resp)) | Ok(Err(ureq::Error::Status(_, resp))) => ureq_to_response(resp),
-        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("核心中继不可达: {e}")).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("反代任务异常: {e}"),
-        )
-            .into_response(),
+        // 传输层失败只留日志: 错误串含内部实现细节, 不进响应体
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "反代核心不可达");
+            proxy_error(
+                StatusCode::BAD_GATEWAY,
+                "core_unreachable",
+                "核心中继不可达",
+            )
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "反代任务异常");
+            proxy_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "内部错误")
+        }
     }
+}
+
+/// 反代错误出口: 与核心 REST 面同错误模型 (不含内部实现细节)。
+fn proxy_error(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(ApiErrorBody {
+            code: code.into(),
+            message: message.into(),
+            details: Vec::new(),
+            request_id: String::new(),
+        }),
+    )
+        .into_response()
 }
 
 /// ureq 应答转 axum 应答 (透传状态码 / Content-Type / 主体)。
@@ -310,7 +335,7 @@ mod tests {
 
     #[test]
     fn 解析_api与ws前缀及缺失资源不回落() {
-        assert_eq!(rel_of("/api/admin/nodes"), None);
+        assert_eq!(rel_of("/api/v1/admin/nodes"), None);
         assert_eq!(rel_of("/ws/signal"), None);
         assert_eq!(rel_of("/assets/app.missing.js"), None);
         assert_eq!(rel_of("/favicon.ico"), None);

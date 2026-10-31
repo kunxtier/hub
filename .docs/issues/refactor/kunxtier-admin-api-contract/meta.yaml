@@ -2,7 +2,7 @@ id: "REF-kunxtier-admin-api-contract-c4f0d8"
 type: "refactor"
 slug: "kunxtier-admin-api-contract"
 title: "relay 管理 API 契约合规整改 (basic-api-contract)"
-status: "open"
+status: "done"
 priority: "high"
 owner: "API"
 tags:

@@ -11,6 +11,7 @@ import type {
   IssueTokenResponse,
   NetworkInfo,
   NodeInfo,
+  Page,
   PathPolicy,
   RelayInfo,
   UserInfo,
@@ -19,7 +20,17 @@ import type {
 /** 列表页轮询间隔 (FR-1 秒级可见; 后台轮询缺省关闭即页签隐藏时暂停)。 */
 const POLL_INTERVAL_MS = 3000;
 
-/** 令牌签发请求体 (POST /api/admin/tokens)。 */
+/** 列表拉取页大小: 按契约上限一次取齐 (个人规模单页足够, 不做分页 UI)。 */
+const LIST_SIZE = 200;
+
+/** 列表请求: 拼页大小参数并解包信封 items (信封定义见 types.ts Page)。 */
+async function apiList<T>(path: string): Promise<T[]> {
+  const sep = path.includes("?") ? "&" : "?";
+  const page = await api<Page<T>>(`${path}${sep}size=${LIST_SIZE}`);
+  return page.items;
+}
+
+/** 令牌签发请求体 (POST /api/v1/admin/tokens)。 */
 interface IssueTokenInput {
   network: string;
   kind: "node" | "relay";
@@ -28,7 +39,7 @@ interface IssueTokenInput {
   ttlSecs: number;
 }
 
-/** 节点策略设置请求体 (POST /api/admin/nodes/policy)。 */
+/** 节点策略设置请求体 (POST /api/v1/admin/nodes/policy)。 */
 interface SetPolicyInput {
   network: string;
   name: string;
@@ -47,7 +58,7 @@ function requireNetwork(network: string | null): string {
 export function useNetworksQuery() {
   return useQuery({
     queryKey: ["networks"],
-    queryFn: () => api<NetworkInfo[]>("/api/admin/networks"),
+    queryFn: () => apiList<NetworkInfo>("/api/v1/admin/networks"),
   });
 }
 
@@ -58,7 +69,7 @@ export function useNodesQuery(network: string | null, owner: string) {
     queryFn: () => {
       const net = requireNetwork(network);
       const ownerQuery = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-      return api<NodeInfo[]>(`/api/admin/nodes?network=${encodeURIComponent(net)}${ownerQuery}`);
+      return apiList<NodeInfo>(`/api/v1/admin/nodes?network=${encodeURIComponent(net)}${ownerQuery}`);
     },
     enabled: network !== null,
     refetchInterval: POLL_INTERVAL_MS,
@@ -69,7 +80,7 @@ export function useNodesQuery(network: string | null, owner: string) {
 export function useRelaysQuery() {
   return useQuery({
     queryKey: ["relays"],
-    queryFn: () => api<RelayInfo[]>("/api/admin/relays"),
+    queryFn: () => apiList<RelayInfo>("/api/v1/admin/relays"),
     refetchInterval: POLL_INTERVAL_MS,
   });
 }
@@ -79,7 +90,7 @@ export function useCreateNetworkMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { name: string; cidr?: string }) =>
-      api<NetworkInfo>("/api/admin/networks", {
+      api<NetworkInfo>("/api/v1/admin/networks", {
         json: { name: input.name, cidr: input.cidr || undefined },
       }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["networks"] }),
@@ -91,7 +102,7 @@ export function useSetNodePolicyMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: SetPolicyInput) =>
-      api<{ ok: boolean }>("/api/admin/nodes/policy", { json: input }),
+      api<{ ok: boolean }>("/api/v1/admin/nodes/policy", { json: input }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["nodes"] }),
   });
 }
@@ -101,7 +112,7 @@ export function useRemoveNodeMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
-      api<{ ok: boolean }>("/api/admin/nodes/remove", { json: input }),
+      api<{ ok: boolean }>("/api/v1/admin/nodes/remove", { json: input }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["nodes"] }),
   });
 }
@@ -110,7 +121,7 @@ export function useRemoveNodeMutation() {
 export function useIssueTokenMutation() {
   return useMutation({
     mutationFn: (input: IssueTokenInput) =>
-      api<IssueTokenResponse>("/api/admin/tokens", {
+      api<IssueTokenResponse>("/api/v1/admin/tokens", {
         json: {
           network: input.network,
           kind: input.kind,
@@ -125,7 +136,7 @@ export function useIssueTokenMutation() {
 export function useRevokeTokenMutation() {
   return useMutation({
     mutationFn: (tokenId: number) =>
-      api<{ ok: boolean }>(`/api/admin/tokens/${tokenId}/revoke`, {
+      api<{ ok: boolean }>(`/api/v1/admin/tokens/${tokenId}/revoke`, {
         method: "POST",
       }),
   });
@@ -138,7 +149,7 @@ export function useUsersQuery(network: string | null) {
     queryKey: ["users", network],
     queryFn: () => {
       const net = requireNetwork(network);
-      return api<UserInfo[]>(`/api/admin/users?network=${encodeURIComponent(net)}`);
+      return apiList<UserInfo>(`/api/v1/admin/users?network=${encodeURIComponent(net)}`);
     },
     enabled: network !== null,
     refetchOnWindowFocus: true,
@@ -150,7 +161,7 @@ export function useCreateUserMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
-      api<{ id: number }>("/api/admin/users", { json: input }),
+      api<{ id: number }>("/api/v1/admin/users", { json: input }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
   });
 }
@@ -160,7 +171,7 @@ export function useDisableUserMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
-      api<{ ok: boolean }>("/api/admin/users/disable", { json: input }),
+      api<{ ok: boolean }>("/api/v1/admin/users/disable", { json: input }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
   });
 }
@@ -170,7 +181,7 @@ export function useEnableUserMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
-      api<{ ok: boolean }>("/api/admin/users/enable", { json: input }),
+      api<{ ok: boolean }>("/api/v1/admin/users/enable", { json: input }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["users"] }),
   });
 }
@@ -180,7 +191,7 @@ export function useRenameUserMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string; newName: string }) =>
-      api<{ ok: boolean }>("/api/admin/users/rename", {
+      api<{ ok: boolean }>("/api/v1/admin/users/rename", {
         json: { network: input.network, name: input.name, new_name: input.newName },
       }),
     onSuccess: () => {
@@ -195,7 +206,7 @@ export function useDeleteUserMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { network: string; name: string }) =>
-      api<{ ok: boolean }>("/api/admin/users/delete", { json: input }),
+      api<{ ok: boolean }>("/api/v1/admin/users/delete", { json: input }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["users"] });
       void client.invalidateQueries({ queryKey: ["nodes"] });

@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -160,7 +159,7 @@ pub async fn ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     if !state.ws_limiter.check(addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, "卫星建连过于频繁, 稍后再试").into_response();
+        return crate::signaling::ws_rate_limited(state.ws_limiter.retry_after());
     }
     ws.max_message_size(64 * 1024)
         .on_upgrade(move |socket| registration_session(socket, state, addr))
@@ -208,6 +207,7 @@ async fn registration_session(mut socket: WebSocket, state: Arc<AppState>, peer:
                         let _ = sender
                             .send(Message::Text(
                                 serde_json::to_string(&SatelliteServerMsg::Closed {
+                                    code: "replaced".into(),
                                     reason: reason.clone(),
                                 })
                                 .unwrap()
@@ -241,6 +241,7 @@ async fn registration_session(mut socket: WebSocket, state: Arc<AppState>, peer:
                                     let _ = sender
                                         .send(Message::Text(
                                             serde_json::to_string(&SatelliteServerMsg::Error {
+                                                code: "already_registered".into(),
                                                 message: "已注册, 忽略重复 register".into(),
                                             })
                                             .unwrap()
@@ -330,6 +331,7 @@ async fn reject(socket: &mut WebSocket, message: &str) {
     let _ = socket
         .send(Message::Text(
             serde_json::to_string(&SatelliteServerMsg::Error {
+                code: "register_rejected".into(),
                 message: message.into(),
             })
             .unwrap()
@@ -487,7 +489,7 @@ async fn register_once(
                 serde_json::from_str(t.as_str()).map_err(|_| "注册应答格式非法".to_string())?;
             match resp {
                 SatelliteServerMsg::Registered => {}
-                SatelliteServerMsg::Error { message } => {
+                SatelliteServerMsg::Error { message, .. } => {
                     return Err(format!("核心拒绝注册: {message}"))
                 }
                 _ => return Err("注册应答非预期".into()),

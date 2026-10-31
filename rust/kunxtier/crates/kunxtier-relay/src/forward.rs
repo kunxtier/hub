@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Bytes;
@@ -152,7 +151,7 @@ pub async fn core_ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     if !state.ws_limiter.check(addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, "转发建连过于频繁, 稍后再试").into_response();
+        return signaling::ws_rate_limited(state.ws_limiter.retry_after());
     }
     ws.max_message_size(MAX_FORWARD_BYTES)
         .on_upgrade(move |socket| core_session(socket, state, addr))
@@ -165,7 +164,7 @@ pub async fn claim_ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     if !state.ws_limiter.check(addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, "转发建连过于频繁, 稍后再试").into_response();
+        return signaling::ws_rate_limited(state.ws_limiter.retry_after());
     }
     ws.max_message_size(MAX_FORWARD_BYTES)
         .on_upgrade(move |socket| claim_session(socket, state, addr))
@@ -241,6 +240,7 @@ async fn admit_by_claim(
                     let _ = try_send_msg(
                         socket,
                         &ForwardServerMsg::Error {
+                            code: "invalid_bind".into(),
                             message: "ip 不是合法的 IPv4 地址".into(),
                         },
                     )
@@ -253,6 +253,7 @@ async fn admit_by_claim(
                 let _ = try_send_msg(
                     socket,
                     &ForwardServerMsg::Error {
+                        code: "invalid_message".into(),
                         message: "首条消息必须是 bind".into(),
                     },
                 )
@@ -269,6 +270,7 @@ async fn admit_by_claim(
             let _ = try_send_msg(
                 socket,
                 &ForwardServerMsg::Error {
+                    code: "invalid_message".into(),
                     message: "准入期仅接受文本帧".into(),
                 },
             )
@@ -316,7 +318,10 @@ async fn run_forward_loop(
                         }
                     }
                     Some(Downstream::Closed(reason)) => {
-                        send_msg_text(&mut sender, &ForwardServerMsg::Closed { reason: reason.clone() }).await;
+                        send_msg_text(&mut sender, &ForwardServerMsg::Closed {
+                            code: "replaced".into(),
+                            reason: reason.clone(),
+                        }).await;
                         break "服务端断开".into();
                     }
                     None => break "注册表通道关闭".into(),
@@ -370,6 +375,7 @@ async fn handle_frame(
                     send_msg_text(
                         sender,
                         &ForwardServerMsg::Error {
+                            code: "invalid_frame".into(),
                             message: "转发帧缺少合法头或载荷".into(),
                         },
                     )
@@ -387,6 +393,7 @@ async fn handle_frame(
                     send_msg_text(
                         sender,
                         &ForwardServerMsg::Error {
+                            code: "already_bound".into(),
                             message: "已绑定, 忽略重复 bind".into(),
                         },
                     )
@@ -396,6 +403,7 @@ async fn handle_frame(
                     send_msg_text(
                         sender,
                         &ForwardServerMsg::Error {
+                            code: "invalid_message".into(),
                             message: "消息格式非法".into(),
                         },
                     )

@@ -254,7 +254,7 @@ async fn authenticate(ws: &mut TlsWs, options: &SignalOptions) -> Result<()> {
         Ok(Some(Err(e))) => return Err(Error::Transport(format!("认证接收失败: {e}"))),
         Ok(Some(Ok(WsMessage::Text(t)))) => match serde_json::from_str::<SignalServerMsg>(&t) {
             Ok(SignalServerMsg::Challenge { nonce }) => nonce,
-            Ok(SignalServerMsg::AuthErr { message }) => {
+            Ok(SignalServerMsg::AuthErr { message, .. }) => {
                 return Err(Error::Transport(format!("认证被拒: {message}")));
             }
             other => return Err(Error::Transport(format!("期望挑战, 实际: {other:?}"))),
@@ -295,7 +295,7 @@ fn translate(msg: SignalServerMsg) -> Option<NodeEvent> {
         SignalServerMsg::PeerOffline { name } => Some(NodeEvent::PeerOffline { name }),
         SignalServerMsg::Relays { relays } => Some(NodeEvent::Relays(relays)),
         SignalServerMsg::Policy { policy } => Some(NodeEvent::Policy(policy)),
-        SignalServerMsg::Closed { reason } => Some(NodeEvent::Closed(reason)),
+        SignalServerMsg::Closed { reason, .. } => Some(NodeEvent::Closed(reason)),
         // 认证期消息已在握手处消费; Pong / Error / SignalErr 不驱动节点状态机
         _ => None,
     }

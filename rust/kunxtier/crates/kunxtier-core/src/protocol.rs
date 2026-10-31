@@ -141,11 +141,39 @@ pub struct RelayInfo {
     pub nodes: usize,
 }
 
+/// 统一错误体 (basic-api-contract 模板): code 机器可读分支依据, message 人读,
+/// details 字段级校验明细 (一次全量返回), request_id 由 HTTP 中间件注入贯穿日志。
+/// code 取值发布后不改语义; message 可变, 不承载业务逻辑。
 #[derive(Debug, Serialize)]
 pub struct ApiErrorBody {
-    pub error: String,
+    pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApiErrorDetail>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
 }
+
+/// 字段级校验明细: field 为请求字段名, reason 说明越界原因。
+#[derive(Debug, Serialize)]
+pub struct ApiErrorDetail {
+    pub field: String,
+    pub reason: String,
+}
+
+/// 列表响应信封 (page 式分页): items 当前页; total 精确计数
+/// (个人规模小表, COUNT 成本可忽略); page 从 1 起, size 有契约上限。
+#[derive(Debug, Serialize)]
+pub struct Page<T: Serialize> {
+    pub items: Vec<T>,
+    pub page: u32,
+    pub size: u32,
+    pub total: u64,
+}
+
+/// REST 契约分页常量: 默认页大小与上限 (超上限 400), CLI 与控制台共用。
+pub const PAGE_SIZE_DEFAULT: u32 = 20;
+pub const PAGE_SIZE_MAX: u32 = 200;
 
 // ---- 信令 WS ----
 
@@ -262,6 +290,9 @@ pub enum SignalServerMsg {
         idle_timeout_secs: u64,
     },
     AuthErr {
+        /// 稳定机器码 (auth_failed), 客户端分支依据; message 人读可变。
+        #[serde(default)]
+        code: String,
         message: String,
     },
     /// 全量节点表 + 中继列表 + 本节点策略 + STUN 列表: 认证通过后推送。
@@ -293,14 +324,23 @@ pub enum SignalServerMsg {
     /// 打洞信令投递失败 (目标不在线等)。
     SignalErr {
         to: String,
+        /// 稳定机器码 (signal_unreachable)。
+        #[serde(default)]
+        code: String,
         message: String,
     },
     /// 协议错误提示 (连接不断开)。
     Error {
+        /// 稳定机器码 (protocol_error / already_bound / invalid_message)。
+        #[serde(default)]
+        code: String,
         message: String,
     },
     /// 服务端裁决断开: 被同名新连接替换 / 凭证吊销。
     Closed {
+        /// 稳定机器码 (replaced / credential_revoked)。
+        #[serde(default)]
+        code: String,
         reason: String,
     },
     /// 中继列表全量更新 (卫星注册 / 断连摘除 / 令牌吊销踢线), 广播到全部网络。
@@ -359,9 +399,15 @@ pub enum ForwardServerMsg {
     },
     Pong,
     Error {
+        /// 稳定机器码 (already_bound / invalid_message / invalid_frame)。
+        #[serde(default)]
+        code: String,
         message: String,
     },
     Closed {
+        /// 稳定机器码 (replaced / idle_timeout 等)。
+        #[serde(default)]
+        code: String,
         reason: String,
     },
 }
@@ -387,9 +433,19 @@ pub enum SatelliteClientMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SatelliteServerMsg {
     Registered,
-    Error { message: String },
+    Error {
+        /// 稳定机器码 (register_rejected / rate_limited 等)。
+        #[serde(default)]
+        code: String,
+        message: String,
+    },
     Pong,
-    Closed { reason: String },
+    Closed {
+        /// 稳定机器码 (replaced / token_revoked 等)。
+        #[serde(default)]
+        code: String,
+        reason: String,
+    },
 }
 
 // ------------------------------ 单元测试 --------------------------------
@@ -397,6 +453,124 @@ pub enum SatelliteServerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REST 契约快照: 字段集与形态的唯一权威对照 (console types.ts 手工投影
+    /// 以此为基准对齐; 改字段即改快照, 走契约评审而非静默漂移)。
+    #[test]
+    fn rest_contract_snapshots() {
+        // 错误体: 必选 code/message, 空明细与空 request_id 不出线
+        let body = ApiErrorBody {
+            code: "not_found".into(),
+            message: "网络不存在: default".into(),
+            details: Vec::new(),
+            request_id: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({"code": "not_found", "message": "网络不存在: default"})
+        );
+        // 错误体: 明细与 request_id 出线形态 (中间件注入后)
+        let body = ApiErrorBody {
+            code: "invalid_request".into(),
+            message: "请求参数越界: size".into(),
+            details: vec![ApiErrorDetail {
+                field: "size".into(),
+                reason: "size 须在 1..=200".into(),
+            }],
+            request_id: "req-1-1".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "code": "invalid_request",
+                "message": "请求参数越界: size",
+                "details": [{"field": "size", "reason": "size 须在 1..=200"}],
+                "request_id": "req-1-1"
+            })
+        );
+        // 分页信封
+        let page = Page {
+            items: vec![NetworkInfo {
+                name: "default".into(),
+                cidr: "100.64.0.0/16".into(),
+                created_at: 1,
+            }],
+            page: 2,
+            size: 20,
+            total: 21,
+        };
+        assert_eq!(
+            serde_json::to_value(&page).unwrap(),
+            serde_json::json!({
+                "items": [{"name": "default", "cidr": "100.64.0.0/16", "created_at": 1}],
+                "page": 2,
+                "size": 20,
+                "total": 21
+            })
+        );
+        // 用户 / 中继 / 登录 / 令牌签发条目字段集
+        assert_eq!(
+            serde_json::to_value(&UserInfo {
+                network: "default".into(),
+                name: "alice".into(),
+                disabled: false,
+                created_at: 1,
+            })
+            .unwrap(),
+            serde_json::json!({"network": "default", "name": "alice", "disabled": false, "created_at": 1})
+        );
+        assert_eq!(
+            serde_json::to_value(&RelayInfo {
+                addr: "1.2.3.4:443".into(),
+                kind: "satellite".into(),
+                fingerprint: "ab".into(),
+                nodes: 3,
+            })
+            .unwrap(),
+            serde_json::json!({"addr": "1.2.3.4:443", "kind": "satellite", "fingerprint": "ab", "nodes": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(&LoginResponse {
+                token: "kxt_ses_x".into(),
+                expires_at: 2,
+            })
+            .unwrap(),
+            serde_json::json!({"token": "kxt_ses_x", "expires_at": 2})
+        );
+        assert_eq!(
+            serde_json::to_value(&IssueTokenResponse {
+                token_id: 7,
+                token: "kxt_node_x".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"token_id": 7, "token": "kxt_node_x"})
+        );
+    }
+
+    /// WS 错误消息 code 字段快照: 客户端分支依据的稳定取值。
+    #[test]
+    fn ws_error_code_snapshots() {
+        let msg = SignalServerMsg::AuthErr {
+            code: "auth_failed".into(),
+            message: "凭证应答不匹配".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({"type": "auth_err", "code": "auth_failed", "message": "凭证应答不匹配"})
+        );
+        let msg = ForwardServerMsg::Closed {
+            code: "replaced".into(),
+            reason: "同 IP 新连接已接入".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({"type": "closed", "code": "replaced", "reason": "同 IP 新连接已接入"})
+        );
+        // 旧服务端无 code 的存量消息仍可解析 (只增演进)
+        let legacy: SignalServerMsg =
+            serde_json::from_str(r#"{"type": "error", "message": "x"}"#).unwrap();
+        assert!(matches!(legacy, SignalServerMsg::Error { code, .. } if code.is_empty()));
+    }
 
     #[test]
     fn forward_frame_roundtrip() {

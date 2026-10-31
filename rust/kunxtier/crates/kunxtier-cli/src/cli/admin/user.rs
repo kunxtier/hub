@@ -60,8 +60,8 @@ impl UserAction {
         match self {
             UserAction::List { network } => {
                 let v = match network {
-                    Some(n) => remote.get(&format!("/users?network={n}"))?,
-                    None => remote.get("/users")?,
+                    Some(n) => remote.get_list(&format!("/users?network={n}"))?,
+                    None => remote.get_list("/users")?,
                 };
                 print_result(&v);
             }
