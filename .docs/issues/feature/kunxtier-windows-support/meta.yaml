@@ -1,0 +1,12 @@
+id: "FEAT-kunxtier-windows-support-6c7015"
+type: "feature"
+slug: "kunxtier-windows-support"
+title: "kunxtier Windows 平台支持 (wintun 与三平台产物)"
+status: "open"
+priority: "low"
+owner: "NODE"
+tags:
+  - "kunxtier"
+  - "windows"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"

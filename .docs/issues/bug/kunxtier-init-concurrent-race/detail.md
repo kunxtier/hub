@@ -27,6 +27,8 @@
 
 - 倾向 state 目录内 `O_EXCL` 创建 `init.lock` (拿到即执行, 结束删除; 残留锁以 pid 存活检测兜底), 比 flock 少一层平台差异
 - 备选: 把 "检查 + 写证书 + 落库" 收进单个 SQLite 事务并不能覆盖证书文件, 不解决文件组一致性, 排除
+- 实施裁决 (2026-10-31, code-review 轮): O_EXCL 自愈方案弃用 — "删文件释放" 根因原语派生 steal TOCTOU / Drop 误删他锁 / pid 复用永久锁死 / 空锁不可自愈四类缺陷; 定案为常驻 `init.lock` 上的内核 flock (LOCK_EX|LOCK_NB, libc cfg(unix), EINTR 重试), 进程退出自动释放, 上述问题连根消除; `ensure_initialized` 撞锁直接报错由服务管理器重启重试 (db 存在性不能作为 "对方已完成" 判据, db 创建远早于证书写入)
+- 二轮裁决 (2026-10-31): 完成度判定收口为锁内 has_admin — `ensure_initialized` 移除 db 文件存在性快路径, 半初始化目录 (上次 init 在 Store::open 后中断, db 在而无 admin) 不再被误判为已初始化, 而是自动补齐; 非 unix 平台保持先前无互斥行为并 warn 留痕 (不把平台边界伪装成调用方错误)
 
 ## 风险与边界
 

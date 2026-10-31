@@ -25,5 +25,9 @@ include_dir.workspace = true
 # 本地控制台反代 (console::proxy_api 的指纹固定通道; 测试侧管理 API 调用同源)
 ureq.workspace = true
 
+# init 进程间互斥锁的 flock (LOCK_EX|LOCK_NB)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

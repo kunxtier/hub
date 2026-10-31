@@ -39,7 +39,7 @@ hub/
 | 文档集中 vs 项目自带 | 集中 `.docs` | 全局可检索; 拆仓时文档需同步迁出 (接受) |
 | 项目横跨语言目录 vs 单一项目目录 | 按语言分目录 | 同项目文件物理分离, 靠命名对应; 换取各语言工具链的目录约定不被打破 |
 
-## 当前实际结构 (2026-10-27, ik-advance T14)
+## 当前实际结构 (2026-10-31, 控制台规范整改 + init 互斥切片)
 
 ```text
 hub/
@@ -67,8 +67,8 @@ hub/
 │                                 #   + events (关键事件留痕环, status --verbose 数据源)
 ├── CLAUDE.md                     # 已创建
 └── web/kunxtier-console/         # 控制台前端 (pnpm + Vite + React + TS + Tailwind v4 + shadcn 风格基件)
-                                  #   src: api (client / types / hooks) + state (AppContext) + components (布局 / 切换器 / ui 基件)
-                                  #   + pages (Login / Overview / Nodes / Tokens / Networks / Relays) + lib (cn / summary)
+                                  #   src: api (client / types / hooks) + state (AppContext) + components (布局 / 切换器 / ErrorHint / tokens 表单域 / ui 基件)
+                                  #   + pages (Login / Overview / Nodes / Tokens / Networks / Relays) + lib (cn re-export / summary)
                                   #   产物经 cargo make console-build 输出 relay assets/console/ (vite outDir 直出)
 ```
 
@@ -129,4 +129,6 @@ hub/
 - 2026-10-27 (T14 预检修正, 启动期封停): daemon 启动期 state 持久故障 (版本拒读 / 解析失败) 走致命态封停留守而非退出进程——KeepAlive / Restart=on-failure 托管下持久故障退出会形成管理器节流拉起循环 (systemd 有 StartLimit 自弃, launchd 无放弃机制); 目录 / socket 级环境失败仍退出 (IPC 无从服务), 重试由管理器节流兜底。
 - 已知妥协 (T14): systemd 单元与命令序列仅单测断言 (macOS 侧编译), Linux 真机 systemctl 流程随人工验证 issue; launchd 特权冒烟为 #[ignore] 用例, 需 KUNXTIER_SMOKE_BIN 提供真实二进制 (current_exe 是测试进程, 不可注册为服务)。
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
+- 2026-10-31 (控制台规范切片, REF-console-frontend-rules): Tokens 页拆分表单域组件 (components/tokens/, 页面降为编排层), ErrorHint 统一查询失败态五页接入, cn 包单一实现替代 clsx+tailwind-merge 自封装 (lib/utils 为 re-export, components.json 别名不变); PathStatus/PathPolicy 字面量联合对齐 protocol.rs 词汇。查询态阶梯抽象与 Panel 卡片原语经评审裁决不做 (各处文案异构, 抽象耦合高于重复成本)。
+- 2026-10-31 (init 互斥, BUG-init-concurrent-race): relay init 进程间互斥 = state 目录常驻 init.lock 上的 flock (LOCK_EX|LOCK_NB; libc 提升为 relay cfg(unix) 直接依赖, EINTR 重试); 互斥先于 Store::open, db 文件创建在互斥内, 保证 cert/key/admin 文件组恒同批次; 进程退出内核自动释放, 无残留锁问题。完成度判定收口为锁内 has_admin (二轮评审裁决): ensure_initialized 移除 db 文件存在性快路径 — db 创建远早于 admin 落库, 半初始化目录 (db 在而无 admin) 会被误判已初始化致 relay 无 admin 起服务, 现此类目录自动补齐。初版 O_EXCL + pid 存活检测自愈方案经 code-review 裁决弃用 (steal 竞态 / Drop 误删他锁 / pid 复用误判 / 空锁不可自愈); SQLite 事务方案弃 (覆盖不了证书文件组); 撞锁直接报错由服务管理器重启重试; 非 unix 保持无互斥 + warn 留痕 (relay 验证平台 Linux)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

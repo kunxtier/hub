@@ -48,3 +48,5 @@ if-addrs = "0.15"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 # feature 与 workspace rustls 对齐 (ring), 避免 aws-lc-rs 进入特性合成
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# relay init 进程间互斥锁的 flock (LOCK_EX|LOCK_NB); 已随 tokio 等在依赖树内
+libc = "0.2"

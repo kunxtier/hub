@@ -2,7 +2,7 @@ id: "BUG-kunxtier-init-concurrent-race-9ae2c8"
 type: "bug"
 slug: "kunxtier-init-concurrent-race"
 title: "init 并发互斥缺失: 首启竞态可产生证书/私钥错配"
-status: "open"
+status: "done"
 priority: "low"
 owner: "CORE"
 tags:

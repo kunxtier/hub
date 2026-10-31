@@ -1,5 +1,5 @@
 tasks:
   - id: "T01"
-    title: "init 入口加 O_EXCL 锁文件互斥, 竞态失败方给出指引"
-    status: "todo"
+    title: "init 入口加 init.lock flock 互斥, 撞锁与半初始化目录给出指引"
+    status: "done"
     owner: "CORE"
