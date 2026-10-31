@@ -71,3 +71,32 @@
 - 四条关键路径日志含 duration_ms 与 outcome
 - forward.rs 转发路径无逐帧 to_vec 拷贝
 - 补齐的锁 unwrap 均带理由注释
+
+## 处理记录 (2026-10-31)
+
+- T01: `Store::open` 在 migrate 前设置 `busy_timeout=5000` + `journal_mode=WAL`; `VACUUM INTO` 备份在 WAL 下产出独立一致性快照, 既有备份测试回归通过, 新增连接 PRAGMA 断言测试
+- T02: init.rs 证书/私钥/admin 凭证三处落盘改 `kunxtier_core::atomic_file::write_atomic`, mode 随创建一步到位 (0o644 / 0o600 / 0o600), 测试补私钥 0600 断言
+- T03: `Downstream::Data` 与 `ForwardRegistry::route` 帧载体改 `Bytes` (复用 `tungstenite::Bytes` re-export, 未新增依赖), 解码仅借用后 owned 帧直接移交, 热路径零拷贝
+- T04: 打洞成功 (probe/activity 两路) 与到期回落日志带 `duration_ms` (`PunchState::Punching` 增加 `started` 字段); 信令认证/建连/关闭、转发准入/绑定/会话断开、节点注册成功/被拒共 11 处日志带 `duration_ms`; 日志形态新增 `KUNXTIER_LOG_FORMAT` env 开关 (text 默认 / json, 显式依赖特性 `tracing-subscriber/json`, 已确认启用)
+
+显式决策 (范围表低危项处置):
+
+- journal 凭证留存: 运行态首启自动初始化 (stderr) 与显式 `relay --init` (stdout) 均改按终端判定, 非终端 (服务化 / 脚本管道) 只提示凭证文件路径不回显明文
+- 语句级超时兜底: 库为进程内单连接 (应用层锁串行化), 外部写者只有 CLI 场景, busy_timeout + WAL 已提供有界等待, 不再叠加 progress_handler 类兜底
+- `KUNXTIER_SMOKE_BIN` env 散读与 daemon 信号监听 expect: 均处测试代码且带理由说明, 属测试钩子/测试失败语义, 不收进运行时配置, 保持现状
+- 五处 SELECT 无 LIMIT: 转移至 REF-kunxtier-admin-api-contract (V8/T02 分页) 一并处理
+- 心跳间隔内联硬编码: satellite 心跳收 `HEARTBEAT_INTERVAL` 常量; 锁 unwrap 注释补齐 session.rs verify/revoke 两处, 其余审计点位核实时已带注释 (行号漂移)
+
+## 审查处置 (2026-10-31, code-review high)
+
+修复 4 条:
+
+- `relay --init` 分支凭证回显补终端判定 (与运行态首启同口径, 脚本化管道部署不再落明文进日志)
+- WAL 切换结果校验: `pragma_update_and_check` 返回值与 wal 比对, 降级时 warn 留痕 (个别文件系统不支持 WAL, 不阻断启动)
+- duration 换算收口 `kunxtier_core::time::elapsed_ms`, 替换 10 处散写 `as_millis() as u64`
+- 打洞成功转直连两处近似块 (on_probe / on_activity) 统一收口 `enter_direct`, 日志/事件/状态构造单点
+
+显式决策 2 条:
+
+- `KUNXTIER_LOG_FORMAT` 维持 env-only: 与本 issue 方案讨论一致; 配置文件/CLI flag 层属配置 schema 演进, 出现真实诉求再补 (避免为对称性扩配置面)
+- init 并发竞态 (检查后写入, 证书/私钥文件组可错配): 先于本切片存在, 正确修法是 init 级进程互斥, 转 BUG-kunxtier-init-concurrent-race-9ae2c8 跟踪

@@ -20,6 +20,7 @@ use gotatun::x25519::PublicKey;
 use tokio::sync::{mpsc, watch};
 
 use kunxtier_core::protocol::{PathPolicy, PeerPathReport, SignalPeer, SignalRelay};
+use kunxtier_core::time::elapsed_ms;
 
 use crate::engine::{build_engine_split, EngineOptions, PeerSpec, WgEngine};
 use crate::error::{Error, Result};
@@ -158,8 +159,8 @@ struct TickActions {
     bursts: Vec<(Vec<SocketAddr>, String, PunchToken)>,
     /// Direct 保活 Ping: (端点, 节点名)。
     pings: Vec<(SocketAddr, String)>,
-    /// 打洞窗口到期: (节点名, fallback 端点)。
-    expired: Vec<(String, Option<SocketAddr>)>,
+    /// 打洞窗口到期: (节点名, fallback 端点, 窗口起点)。
+    expired: Vec<(String, Option<SocketAddr>, Instant)>,
     /// 直连失活: 节点名。
     dead: Vec<String>,
     /// 周期重试直连: (节点名, fallback 端点)。
@@ -466,6 +467,7 @@ where
             }
             entry.state = PunchState::Punching {
                 deadline: Instant::now() + window,
+                started: Instant::now(),
                 token: PunchToken::random(),
                 fallback,
             };
@@ -568,46 +570,40 @@ where
         if self.policy() == PathPolicy::ForceRelay {
             return;
         }
-        let Some(entry) = self.peers.get_mut(&name) else {
-            return;
-        };
-        let public_key = entry.public_key;
         let now = Instant::now();
         let next_ping = now + self.options.timings.ping;
-        let punching = entry.state.is_punching();
-        let learn_endpoint = punching || entry.state.is_direct();
-        let mut became_direct = false;
-        if let Some(entry) = self.peers.get_mut(&name) {
-            match &mut entry.state {
-                PunchState::Punching { .. } => became_direct = true,
-                // 端点漂移 (对端 NAT 重映射): 跟随新端点并刷新活性
-                PunchState::Direct {
-                    endpoint,
-                    last_alive,
-                    ..
-                } => {
-                    *endpoint = from;
-                    *last_alive = now;
-                }
-                // 无打洞意图 (Relayed / Idle): 只应答, 不动在用路径,
-                // 直连由本端自己的重试窗口裁决
-                _ => {}
-            }
-            if became_direct {
-                tracing::info!(peer = %name, endpoint = %from, "打洞成功, 切换直连");
-                entry.state = PunchState::Direct {
-                    endpoint: from,
-                    last_alive: now,
-                    next_ping,
+        // 单次借用完成判定: Punching 取窗口起点 (稍后转直连),
+        // Direct 跟随端点漂移并刷新活性
+        let (public_key, punch_started) = match self.peers.get_mut(&name) {
+            Some(entry) => {
+                let public_key = entry.public_key;
+                let punch_started = match &mut entry.state {
+                    PunchState::Punching { started, .. } => Some(*started),
+                    // 端点漂移 (对端 NAT 重映射): 跟随新端点并刷新活性
+                    PunchState::Direct {
+                        endpoint,
+                        last_alive,
+                        ..
+                    } => {
+                        *endpoint = from;
+                        *last_alive = now;
+                        None
+                    }
+                    // 无打洞意图 (Relayed / Idle): 只应答, 不动在用路径,
+                    // 直连由本端自己的重试窗口裁决
+                    _ => None,
                 };
+                (public_key, punch_started)
             }
-        }
-        if became_direct {
-            self.note(
-                EventKind::Punch,
-                Some(&name),
-                format!("打洞成功, 切换直连 ({from})"),
-            );
+            None => return,
+        };
+        let learn_endpoint = punch_started.is_some()
+            || self
+                .peers
+                .get(&name)
+                .is_some_and(|entry| entry.state.is_direct());
+        if let Some(started) = punch_started {
+            self.enter_direct(&name, from, started, now, next_ping);
         }
         self.reverse.insert(from, name.clone());
         if learn_endpoint {
@@ -633,36 +629,54 @@ where
         };
         let now = Instant::now();
         let next_ping = now + self.options.timings.ping;
-        let punching = entry.state.is_punching();
-        let drift =
-            matches!(&entry.state, PunchState::Direct { endpoint, .. } if *endpoint != source);
-        if punching {
-            tracing::info!(peer = %name, endpoint = %source, "打洞成功, 切换直连");
-            entry.state = PunchState::Direct {
-                endpoint: source,
-                last_alive: now,
-                next_ping,
-            };
-        } else if drift {
-            // 端点漂移 (对端 NAT 重映射): 跟随新端点
-            if let PunchState::Direct {
+        let punch_started = match &mut entry.state {
+            PunchState::Punching { started, .. } => Some(*started),
+            // 端点漂移 (对端 NAT 重映射): 跟随新端点并刷新活性
+            PunchState::Direct {
                 endpoint,
                 last_alive,
                 ..
-            } = &mut entry.state
-            {
+            } if *endpoint != source => {
                 *endpoint = source;
                 *last_alive = now;
+                None
             }
-        }
-        if punching {
-            self.note(
-                EventKind::Punch,
-                Some(&name),
-                format!("打洞成功, 切换直连 ({source})"),
-            );
+            _ => None,
+        };
+        if let Some(started) = punch_started {
+            self.enter_direct(&name, source, started, now, next_ping);
         }
         self.refresh_status();
+    }
+
+    /// 打洞成功共通收口 (探测应答 / WG 流量两条观测路共用):
+    /// 留痕 duration 日志与关键事件后转入 Direct; 日志/事件/状态构造保持单点。
+    fn enter_direct(
+        &mut self,
+        name: &str,
+        endpoint: SocketAddr,
+        started: Instant,
+        now: Instant,
+        next_ping: Instant,
+    ) {
+        tracing::info!(
+            peer = %name,
+            endpoint = %endpoint,
+            duration_ms = elapsed_ms(started),
+            "打洞成功, 切换直连"
+        );
+        if let Some(entry) = self.peers.get_mut(name) {
+            entry.state = PunchState::Direct {
+                endpoint,
+                last_alive: now,
+                next_ping,
+            };
+        }
+        self.note(
+            EventKind::Punch,
+            Some(name),
+            format!("打洞成功, 切换直连 ({endpoint})"),
+        );
     }
 
     /// 路径节拍 (PROBE_INTERVAL): 打洞突发 / 窗口到期 / Direct 保活 Ping 与
@@ -676,8 +690,8 @@ where
             let token = PunchToken::random();
             self.send_probes(&[endpoint], &name, &token);
         }
-        for (name, fallback) in actions.expired {
-            self.on_punch_expired(name, fallback).await;
+        for (name, fallback, started) in actions.expired {
+            self.on_punch_expired(name, fallback, started).await;
         }
         for name in actions.dead {
             self.on_direct_dead(name).await;
@@ -737,11 +751,12 @@ where
             match &mut entry.state {
                 PunchState::Punching {
                     deadline,
+                    started,
                     token,
                     fallback,
                 } => {
                     if now >= *deadline {
-                        actions.expired.push((name.clone(), *fallback));
+                        actions.expired.push((name.clone(), *fallback, *started));
                     } else if entry.online && !entry.candidates.is_empty() {
                         actions
                             .bursts
@@ -778,15 +793,22 @@ where
     /// 打洞窗口到期: fallback (既有中继路径) 仍在线才直接回退, 流量未中断;
     /// 中继在窗口期死亡 / 失联时重选在线中继, 避免锚定死端点无法自愈;
     /// 无 fallback 时回落中继 (FR-3) 或无中继可用则回 Idle 等待。
-    async fn on_punch_expired(&mut self, name: String, fallback: Option<SocketAddr>) {
-        let next_retry = Instant::now() + self.options.timings.retry;
+    async fn on_punch_expired(
+        &mut self,
+        name: String,
+        fallback: Option<SocketAddr>,
+        started: Instant,
+    ) {
+        let now = Instant::now();
+        let duration_ms = elapsed_ms(started);
+        let next_retry = now + self.options.timings.retry;
         let fallback = fallback.filter(|pseudo| {
             PathHub::split_pseudo(*pseudo)
                 .map(|(id, _)| self.hub.relay_online(id))
                 .unwrap_or(false)
         });
         if let Some(pseudo) = fallback {
-            tracing::info!(peer = %name, "重试打洞未果, 保持中继 (FR-6)");
+            tracing::info!(peer = %name, duration_ms, "重试打洞未果, 保持中继 (FR-6)");
             self.note(EventKind::Punch, Some(&name), "重试打洞未果, 保持中继");
             if let Some(entry) = self.peers.get_mut(&name) {
                 entry.state = PunchState::Relayed {
@@ -805,7 +827,7 @@ where
         };
         match self.pick_relay(vip) {
             Some(pseudo) => {
-                tracing::info!(peer = %name, relay_endpoint = %pseudo, "打洞超时, 回落中继 (FR-3)");
+                tracing::info!(peer = %name, relay_endpoint = %pseudo, duration_ms, "打洞超时, 回落中继 (FR-3)");
                 self.note(
                     EventKind::Punch,
                     Some(&name),

@@ -2,7 +2,7 @@ id: "BUG-kunxtier-admin-duplicate-create-500-241031"
 type: "bug"
 slug: "kunxtier-admin-duplicate-create-500"
 title: "admin 重复创建用户/网络组返回 500 内部错误"
-status: "closed"
+status: "done"
 priority: "medium"
 owner: "SRV"
 tags:

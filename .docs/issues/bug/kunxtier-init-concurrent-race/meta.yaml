@@ -1,0 +1,13 @@
+id: "BUG-kunxtier-init-concurrent-race-9ae2c8"
+type: "bug"
+slug: "kunxtier-init-concurrent-race"
+title: "init 并发互斥缺失: 首启竞态可产生证书/私钥错配"
+status: "open"
+priority: "low"
+owner: "CORE"
+tags:
+  - "kunxtier"
+  - "relay"
+  - "audit"
+created_at: "2026-10-31"
+updated_at: "2026-10-31"

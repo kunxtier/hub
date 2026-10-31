@@ -140,11 +140,21 @@ impl RelayCommand {
             println!("初始化完成");
             println!("  状态目录: {}", out.data_dir);
             println!();
-            println!(
-                "  admin 凭证 (已写入 {}, 首次登录后建议删除):",
-                kunxtier_relay::ADMIN_CREDENTIAL_FILE
-            );
-            println!("    {}", out.admin_credential);
+            // 脚本化部署 (stdout 重定向进日志) 时不回显明文, 与运行态首启同一口径
+            use std::io::IsTerminal;
+            if std::io::stdout().is_terminal() {
+                println!(
+                    "  admin 凭证 (已写入 {}, 首次登录后建议删除):",
+                    kunxtier_relay::ADMIN_CREDENTIAL_FILE
+                );
+                println!("    {}", out.admin_credential);
+            } else {
+                println!(
+                    "  admin 凭证已写入 {}/{} (非终端输出不回显明文)",
+                    out.data_dir,
+                    kunxtier_relay::ADMIN_CREDENTIAL_FILE
+                );
+            }
             println!();
             println!("  服务端证书指纹 (客户端固定使用):");
             println!("    {}", out.fingerprint);
@@ -162,12 +172,22 @@ impl RelayCommand {
             .map_err(|e| Fail::runtime(format!("自动初始化失败: {e}")))?
         {
             eprintln!("数据目录未初始化, 已自动完成初始化");
-            eprintln!(
-                "  admin 凭证 (已写入 {}/{}):",
-                out.data_dir,
-                kunxtier_relay::ADMIN_CREDENTIAL_FILE
-            );
-            eprintln!("    {}", out.admin_credential);
+            // 服务化 (无终端) 时凭证只落文件不回显: journal 属持久日志, 明文留存违反安全红线
+            use std::io::IsTerminal;
+            if std::io::stderr().is_terminal() {
+                eprintln!(
+                    "  admin 凭证 (已写入 {}/{}):",
+                    out.data_dir,
+                    kunxtier_relay::ADMIN_CREDENTIAL_FILE
+                );
+                eprintln!("    {}", out.admin_credential);
+            } else {
+                eprintln!(
+                    "  admin 凭证已写入 {}/{} (服务化日志不回显明文)",
+                    out.data_dir,
+                    kunxtier_relay::ADMIN_CREDENTIAL_FILE
+                );
+            }
             eprintln!("  服务端证书指纹 (客户端固定使用):");
             eprintln!("    {}", out.fingerprint);
         }

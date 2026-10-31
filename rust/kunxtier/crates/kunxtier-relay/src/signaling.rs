@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use kunxtier_core::protocol::{
     PathPolicy, PeerPathReport, SignalClientMsg, SignalPeer, SignalServerMsg,
 };
+use kunxtier_core::time::elapsed_ms;
 use kunxtier_core::token;
 
 use crate::server::AppState;
@@ -281,10 +282,16 @@ pub(crate) struct Authenticated {
 /// 信令会话: 认证 (限时) → 登记 → 初始化推送 → 事件循环 → 收尾。
 /// 主循环为事件驱动的最外层封装 (rust.md 架构约束), 退出与清理路径显式收口。
 async fn session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketAddr) {
+    let started = Instant::now();
     let auth = match authenticate(&mut socket, &state, peer).await {
         Ok(a) => a,
         Err(reason) => {
-            tracing::info!(%peer, %reason, "信令认证未完成");
+            tracing::info!(
+                %peer,
+                %reason,
+                duration_ms = elapsed_ms(started),
+                "信令认证未完成"
+            );
             let _ = socket.close().await;
             return;
         }
@@ -295,8 +302,14 @@ async fn session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketAddr) 
     if let Some(version) = auth.version.clone() {
         state.online.set_version(&key, gen, version);
     }
-    // 认证全程无凭证明文经手, 日志仅记身份 (NFR-4)
-    tracing::info!(network = %key.0, node = %key.1, %peer, "信令通道建立");
+    // 认证全程无凭证明文经手, 日志仅记身份 (NFR-4); duration 为认证建连耗时
+    tracing::info!(
+        network = %key.0,
+        node = %key.1,
+        %peer,
+        duration_ms = elapsed_ms(started),
+        "信令通道建立"
+    );
 
     if let Err(reason) = announce_and_push(&mut socket, &state, &auth).await {
         teardown(&state, &key, gen);
@@ -343,7 +356,14 @@ async fn session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketAddr) 
     };
     let _ = sender.close().await;
     teardown(&state, &key, gen);
-    tracing::info!(network = %key.0, node = %key.1, %reason, "信令通道关闭");
+    // duration 为会话全程时长 (自连接进入起算)
+    tracing::info!(
+        network = %key.0,
+        node = %key.1,
+        %reason,
+        duration_ms = elapsed_ms(started),
+        "信令通道关闭"
+    );
 }
 
 /// 会话收尾: 摘除注册表; 摘除成功 (未被替换 / 未被踢) 时向同网广播下线。

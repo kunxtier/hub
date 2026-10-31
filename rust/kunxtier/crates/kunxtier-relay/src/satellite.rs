@@ -37,6 +37,8 @@ use crate::{Error, Result};
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// 注册通道空闲超时: 卫星 10s 心跳, 断连须秒级可见 (FR-18)。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 卫星心跳间隔: 与空闲超时配套, 断连须秒级可见 (FR-18)。
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// 注册重连退避: 1s 起步, 指数退避, 30s 封顶; 注册成功后复位。
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -497,7 +499,7 @@ async fn register_once(
 
     // 注册成功: 心跳维持, 断开 / 超时即返回由外层重连
     let (mut sink, mut stream) = ws.split();
-    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {

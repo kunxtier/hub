@@ -1,0 +1,5 @@
+tasks:
+  - id: "T01"
+    title: "init 入口加 O_EXCL 锁文件互斥, 竞态失败方给出指引"
+    status: "todo"
+    owner: "CORE"

@@ -99,8 +99,10 @@ pub enum PunchState {
     Idle,
     /// 打洞进行中: 截止时间 + 本轮会话令牌 + 既有路径 (回落 / 重试期间保持,
     /// 打洞尝试不中断在用流量; None 表示尚无任何路径)。
+    /// started 为窗口起点, 供结果日志计 duration_ms。
     Punching {
         deadline: Instant,
+        started: Instant,
         token: PunchToken,
         fallback: Option<SocketAddr>,
     },
@@ -187,6 +189,7 @@ mod tests {
         assert_eq!(
             PunchState::Punching {
                 deadline: now,
+                started: now,
                 token: PunchToken::random(),
                 fallback: None,
             }
@@ -197,6 +200,7 @@ mod tests {
         assert_eq!(
             PunchState::Punching {
                 deadline: now,
+                started: now,
                 token: PunchToken::random(),
                 fallback: Some(addr),
             }

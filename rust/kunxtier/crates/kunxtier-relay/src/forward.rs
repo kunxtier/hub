@@ -13,7 +13,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -21,8 +21,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Bytes;
 
 use kunxtier_core::protocol::{decode_forward_frame, ForwardClientMsg, ForwardServerMsg};
+use kunxtier_core::time::elapsed_ms;
 
 use crate::ratelimit::RateLimiter;
 use crate::server::AppState;
@@ -40,7 +42,7 @@ const OUTBOUND_CAPACITY: usize = 64;
 /// 下行消息: 数据帧或服务端裁决断开。
 #[derive(Debug)]
 pub(crate) enum Downstream {
-    Data(Vec<u8>),
+    Data(Bytes),
     Closed(String),
 }
 
@@ -102,7 +104,7 @@ impl ForwardRegistry {
     }
 
     /// 投递一帧: 目的未登记或慢消费返回 false (调用方按 UDP 语义丢弃)。
-    pub(crate) fn route(&self, dst: &Ipv4Addr, frame: Vec<u8>) -> bool {
+    pub(crate) fn route(&self, dst: &Ipv4Addr, frame: Bytes) -> bool {
         let map = self.lock();
         match map.iter().find(|(k, _)| k == dst) {
             Some((_, slot)) => slot.tx.try_send(Downstream::Data(frame)).is_ok(),
@@ -170,11 +172,17 @@ pub async fn claim_ws_handler(
 }
 
 async fn core_session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketAddr) {
+    let started = Instant::now();
     // 认证复用信令面: 失败原因只进日志, 不区分不存在 / 吊销 (防存在性探测)
     let auth = match signaling::authenticate(&mut socket, &state, peer).await {
         Ok(a) => a,
         Err(reason) => {
-            tracing::info!(%peer, %reason, "转发准入未完成");
+            tracing::info!(
+                %peer,
+                %reason,
+                duration_ms = elapsed_ms(started),
+                "转发准入未完成"
+            );
             let _ = socket.close().await;
             return;
         }
@@ -192,11 +200,17 @@ async fn core_session(mut socket: WebSocket, state: Arc<AppState>, peer: SocketA
 }
 
 async fn claim_session(mut socket: WebSocket, state: Arc<SatelliteState>, peer: SocketAddr) {
+    let started = Instant::now();
     let deadline = tokio::time::Instant::now() + AUTH_TIMEOUT;
     let Some(ip) = admit_by_claim(&mut socket, deadline, peer).await else {
         return; // 已应答错误并关闭
     };
-    tracing::info!(%peer, %ip, "卫星转发端点绑定");
+    tracing::info!(
+        %peer,
+        %ip,
+        duration_ms = elapsed_ms(started),
+        "卫星转发端点绑定"
+    );
     run_forward_loop(socket, &state.forward, ip, peer).await;
 }
 
@@ -274,6 +288,7 @@ async fn run_forward_loop(
     ip: Ipv4Addr,
     peer: SocketAddr,
 ) {
+    let bound_at = Instant::now();
     // 心跳参数随 Bound 下发, 客户端不硬编码 (与信令 AuthOk 同一原则)
     let bound = ForwardServerMsg::Bound {
         ip: ip.to_string(),
@@ -296,7 +311,7 @@ async fn run_forward_loop(
             out = rx.recv() => {
                 match out {
                     Some(Downstream::Data(bytes)) => {
-                        if sender.send(Message::Binary(bytes.into())).await.is_err() {
+                        if sender.send(Message::Binary(bytes)).await.is_err() {
                             break "发送失败".into();
                         }
                     }
@@ -325,7 +340,14 @@ async fn run_forward_loop(
     };
     let _ = sender.close().await;
     forward.unbind(&ip, gen);
-    tracing::info!(%peer, %ip, %reason, "转发端点断开");
+    // duration 为转发会话全程时长 (自绑定起算)
+    tracing::info!(
+        %peer,
+        %ip,
+        %reason,
+        duration_ms = elapsed_ms(bound_at),
+        "转发端点断开"
+    );
 }
 
 /// 处理上行帧; 返回 Some(原因) 表示会话结束。
@@ -336,12 +358,12 @@ async fn handle_frame(
 ) -> Option<String> {
     match msg {
         Message::Binary(bytes) => {
-            let frame = bytes.to_vec();
-            match decode_forward_frame(&frame) {
+            match decode_forward_frame(&bytes) {
                 // 原帧整体投递 (帧头对上下行同构, 接收方以自身 IP 校验目的);
-                // 未知目的 / 慢消费按 UDP 语义静默丢弃: 不回执, 不逐帧记日志
+                // 未知目的 / 慢消费按 UDP 语义静默丢弃: 不回执, 不逐帧记日志;
+                // 解码只借用, owned 帧直接移交注册表, 热路径零拷贝
                 Some((dst, _src, _payload)) => {
-                    let _ = forward.route(&dst, frame);
+                    let _ = forward.route(&dst, bytes);
                     None
                 }
                 None => {
@@ -451,7 +473,7 @@ mod tests {
         reg.bind(a, tx);
         // 目的命中: 原帧投递 (帧头保留)
         let frame = kunxtier_core::protocol::encode_forward_frame(b, a, &[9, 9]);
-        assert!(reg.route(&a, frame));
+        assert!(reg.route(&a, frame.into()));
         match rx.try_recv() {
             Ok(Downstream::Data(bytes)) => {
                 let (dst, src, payload) = decode_forward_frame(&bytes).unwrap();
@@ -462,6 +484,6 @@ mod tests {
             other => panic!("期望数据帧, 实际: {other:?}"),
         }
         // 未登记目的: 不投递也不报错
-        assert!(!reg.route(&b, vec![0; 5]));
+        assert!(!reg.route(&b, Bytes::from(vec![0; 5])));
     }
 }

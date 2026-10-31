@@ -2,7 +2,7 @@ id: "FEAT-kunxtier-user-ops-241031"
 type: "feature"
 slug: "kunxtier-user-ops"
 title: "kunxtier 用户管理完整操作集"
-status: "closed"
+status: "done"
 priority: "medium"
 owner: "SRV"
 tags:

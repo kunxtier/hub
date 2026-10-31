@@ -6,7 +6,7 @@
 //! 凭证与令牌只存 sha256 哈希 (base64 形态), 明文不落库 (NFR-2 / NFR-8)。
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -84,6 +84,16 @@ impl Store {
             }
         }
         let conn = Connection::open(path)?;
+        // 单连接被信令/转发/HTTP/CLI 多处共享, 写锁等待必须有上界 (5s);
+        // WAL 让读不再阻塞写, -wal/-shm 文件随连接存在, 最后一个连接干净关闭时自动合并回主库
+        conn.busy_timeout(Duration::from_millis(5_000))?;
+        // WAL 失败不阻断启动 (个别文件系统不支持), busy_timeout 仍兜底写锁上界;
+        // 但降级必须留痕可辨, 否则部署差异无从发现
+        let mode: String =
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            tracing::warn!(journal_mode = %mode, "WAL 未生效, 读写并发退回阻塞模式");
+        }
         let store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -823,6 +833,21 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("数据目录不存在"), "实际: {msg}");
         assert!(msg.contains("relay --init"), "实际: {msg}");
+    }
+
+    #[test]
+    fn 连接启用wal与有界写锁等待() {
+        let (_dir, s) = store();
+        let mode: String = s
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "journal_mode 应为 wal");
+        let timeout: i64 = s
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "busy_timeout 应为 5000ms");
     }
 
     #[test]

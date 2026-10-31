@@ -2,7 +2,7 @@ id: "BUG-kunxtier-fallback-post-405-241031"
 type: "bug"
 slug: "kunxtier-fallback-post-405"
 title: "未注册路径的 POST 请求返回 405 而非控制台 fallback 判定"
-status: "closed"
+status: "done"
 priority: "low"
 owner: "SRV"
 tags:

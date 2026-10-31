@@ -10,5 +10,6 @@ pub mod atomic_file;
 pub mod config;
 pub mod error;
 pub mod protocol;
+pub mod time;
 pub mod tls;
 pub mod token;

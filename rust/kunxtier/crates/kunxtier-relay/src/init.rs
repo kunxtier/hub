@@ -3,6 +3,7 @@
 //! Author: qinzhenya
 //! Created: 2026-10-21
 
+use kunxtier_core::atomic_file::write_atomic;
 use kunxtier_core::config::RelayConfig;
 
 use crate::cert;
@@ -47,14 +48,9 @@ pub fn init(cfg: &RelayConfig) -> Result<InitOutput> {
     }
 
     let ck = cert::generate_self_signed().map_err(|e| Error::Cert(e.to_string()))?;
-    std::fs::write(cfg.cert_path(), &ck.cert_pem)?;
-    std::fs::write(cfg.key_path(), &ck.key_pem)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(cfg.key_path(), std::fs::Permissions::from_mode(0o600))?;
-        std::fs::set_permissions(cfg.cert_path(), std::fs::Permissions::from_mode(0o644))?;
-    }
+    // 私钥/证书原子写 + mode 随创建一步到位, 杜绝 "先写后改权限" 的宽权限窗口与半截文件
+    write_atomic(&cfg.cert_path(), ck.cert_pem.as_bytes(), 0o644)?;
+    write_atomic(&cfg.key_path(), ck.key_pem.as_bytes(), 0o600)?;
 
     let base =
         kunxtier_core::address::nth_network_base(0).map_err(|e| Error::Usage(e.to_string()))?;
@@ -62,12 +58,7 @@ pub fn init(cfg: &RelayConfig) -> Result<InitOutput> {
 
     // 凭证同时写入 state 目录 (0600): 启动输出被 journal 吞掉或错过后可找回
     let cred_path = cfg.data_dir.join(ADMIN_CREDENTIAL_FILE);
-    std::fs::write(&cred_path, format!("{admin}\n"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_atomic(&cred_path, format!("{admin}\n").as_bytes(), 0o600)?;
 
     tracing::info!(data_dir = %cfg.data_dir.display(), "核心中继初始化完成");
     Ok(InitOutput {
@@ -116,6 +107,12 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&cred_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
+            let key_mode = std::fs::metadata(cfg.key_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(key_mode, 0o600, "私钥应以 0600 落盘");
         }
         // 已初始化后不重复执行
         assert!(ensure_initialized(&cfg).unwrap().is_none());

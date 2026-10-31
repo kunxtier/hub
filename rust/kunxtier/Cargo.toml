@@ -32,7 +32,7 @@ rand = "0.9"
 base64 = "0.22"
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tempfile = "3"
 # 控制台构建产物嵌入 (relay: assets/console 文件表)
 include_dir = "0.7"

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
@@ -25,6 +25,7 @@ use kunxtier_core::protocol::{
     RegisterResponse, RelayInfo, RemoveNodeRequest, RenameUserRequest, SetNodePolicyRequest,
     SignalRelay, SignalServerMsg, UserInfo,
 };
+use kunxtier_core::time::elapsed_ms;
 
 use crate::forward::ForwardRegistry;
 use crate::ratelimit::RateLimiter;
@@ -294,6 +295,7 @@ async fn register(
     if !state.register_limiter.check(addr.ip()) {
         return Err(ApiError::too_many());
     }
+    let started = Instant::now();
     let (network, ip, node_credential) =
         match state
             .lock_store()
@@ -302,12 +304,24 @@ async fn register(
             Ok(out) => out,
             Err(e) => {
                 // FR-4 / NFR-4: 留痕失败类别与来源, 不记录令牌 / 凭证明文
-                tracing::warn!(ip = %addr.ip(), node = %req.name, error = %e, "节点注册被拒");
+                tracing::warn!(
+                    ip = %addr.ip(),
+                    node = %req.name,
+                    error = %e,
+                    duration_ms = elapsed_ms(started),
+                    "节点注册被拒"
+                );
                 return Err(e.into());
             }
         };
     // 注意: 不记录任何令牌 / 凭证明文 (NFR-4)
-    tracing::info!(node = %req.name, network = %network, ip = %ip, "节点注册成功");
+    tracing::info!(
+        node = %req.name,
+        network = %network,
+        ip = %ip,
+        duration_ms = elapsed_ms(started),
+        "节点注册成功"
+    );
     Ok(Json(RegisterResponse {
         network,
         ip,

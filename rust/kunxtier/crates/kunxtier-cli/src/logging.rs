@@ -4,6 +4,7 @@
 //! Created: 2026-10-26
 //!
 //! 级别优先级 CLI flag > relay 配置文件 > RUST_LOG > 默认 info (NFR FR-1);
+//! 输出形态由 KUNXTIER_LOG_FORMAT 决定 (text 默认 / json 机器采集);
 //! --log-file 启用后 stderr 与文件双写, 文件按大小轮转保留一份 .old。
 
 use std::fs::{File, OpenOptions};
@@ -57,6 +58,23 @@ fn level_directive(v: &str) -> Result<String, Fail> {
     }
 }
 
+/// 日志输出形态: text 人读 (默认) / json 机器采集 (字段结构稳定, 供采集与聚合)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+/// 解析输出形态: KUNXTIER_LOG_FORMAT 未设置默认 text;
+/// 显式设置时只接受 text/json, 其余值立即报错 (不走静默回退)。
+fn resolve_format(env: Option<&str>) -> Result<LogFormat, Fail> {
+    match env.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("text") => Ok(LogFormat::Text),
+        Some("json") => Ok(LogFormat::Json),
+        Some(v) => Err(Fail::usage(format!("非法日志格式 {v} (支持 text/json)"))),
+    }
+}
+
 /// 初始化全局 subscriber; 全进程仅调用一次 (main 装配阶段)。
 pub fn init(spec: &LogSpec, config_level: Option<&str>) -> Result<(), Fail> {
     let directive = resolve_directive(
@@ -64,6 +82,7 @@ pub fn init(spec: &LogSpec, config_level: Option<&str>) -> Result<(), Fail> {
         config_level,
         std::env::var("RUST_LOG").ok().as_deref(),
     )?;
+    let format = resolve_format(std::env::var("KUNXTIER_LOG_FORMAT").ok().as_deref())?;
     let filter = tracing_subscriber::EnvFilter::new(directive);
     let file = match &spec.file {
         None => None,
@@ -71,10 +90,18 @@ pub fn init(spec: &LogSpec, config_level: Option<&str>) -> Result<(), Fail> {
             |e| Fail::usage(format!("日志文件不可写 {}: {e}", path.display())),
         )?)),
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(TeeWriter { file })
-        .init();
+    let writer = TeeWriter { file };
+    match format {
+        LogFormat::Text => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .json()
+            .init(),
+    }
     Ok(())
 }
 
@@ -211,6 +238,17 @@ mod tests {
         assert!(resolve_directive(None, Some("DEBUG "), None).is_err());
         // RUST_LOG 层不做级别校验, 由 EnvFilter 语义兜底
         assert!(resolve_directive(None, None, Some("verbose")).is_ok());
+    }
+
+    #[test]
+    fn format_defaults_to_text_and_rejects_unknown() {
+        assert_eq!(resolve_format(None).unwrap(), LogFormat::Text);
+        assert_eq!(resolve_format(Some("")).unwrap(), LogFormat::Text);
+        assert_eq!(resolve_format(Some("  ")).unwrap(), LogFormat::Text);
+        assert_eq!(resolve_format(Some("text")).unwrap(), LogFormat::Text);
+        assert_eq!(resolve_format(Some("json")).unwrap(), LogFormat::Json);
+        assert!(resolve_format(Some("JSON")).is_err());
+        assert!(resolve_format(Some("pretty")).is_err());
     }
 
     #[test]

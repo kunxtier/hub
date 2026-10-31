@@ -47,6 +47,7 @@ impl SessionTable {
 
     /// 校验会话; 过期惰性清除 (不触发后台清扫)。
     pub fn verify(&self, token: &str) -> bool {
+        // unwrap 理由: 锁中毒即会话表不可信, 快速失败优于带病鉴权
         let mut map = self.inner.lock().unwrap();
         match map.get(token) {
             Some(expires) if *expires > Instant::now() => true,
@@ -60,6 +61,7 @@ impl SessionTable {
 
     /// 登出: 移除会话 (幂等, 返回是否存在)。
     pub fn revoke(&self, token: &str) -> bool {
+        // unwrap 理由: 锁中毒即会话表不可信, 快速失败优于带病鉴权
         self.inner.lock().unwrap().remove(token).is_some()
     }
 }
