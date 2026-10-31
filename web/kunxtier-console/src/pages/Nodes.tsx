@@ -8,6 +8,8 @@
 import { useEffect, useState } from "react";
 import { useNodesQuery, useRemoveNodeMutation, useSetNodePolicyMutation } from "@/api/hooks";
 import { errorMessage } from "@/api/client";
+import type { NodeInfo, PathPolicy } from "@/api/types";
+import ErrorHint from "@/components/ErrorHint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,6 +66,8 @@ export default function NodesPage() {
 
       {nodesQuery.isLoading ? (
         <p className="text-sm text-muted-foreground">节点加载中</p>
+      ) : nodesQuery.isError ? (
+        <ErrorHint error={nodesQuery.error} onRetry={() => void nodesQuery.refetch()} />
       ) : nodes.length === 0 ? (
         <p className="text-sm text-muted-foreground">无匹配节点</p>
       ) : (
@@ -149,7 +153,7 @@ export default function NodesPage() {
   );
 
   /** 切换节点路径策略 (FR-10: auto / force_relay 互切)。 */
-  function togglePolicy(currentNetwork: string | null, name: string, policy: string) {
+  function togglePolicy(currentNetwork: string | null, name: string, policy: PathPolicy) {
     if (currentNetwork === null) {
       return;
     }
@@ -172,7 +176,7 @@ export default function NodesPage() {
 }
 
 /** 节点逐对端路径概况 (title 提示承载明细)。 */
-function pathTooltip(node: { paths: { peer: string; path: string; relay?: string }[] }) {
+function pathTooltip(node: NodeInfo) {
   if (node.paths.length === 0) {
     return <span className="block">无路径上报</span>;
   }

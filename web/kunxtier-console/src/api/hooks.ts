@@ -69,7 +69,9 @@ export function useNodesQuery(network: string | null, owner: string) {
     queryFn: () => {
       const net = requireNetwork(network);
       const ownerQuery = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-      return apiList<NodeInfo>(`/api/v1/admin/nodes?network=${encodeURIComponent(net)}${ownerQuery}`);
+      return apiList<NodeInfo>(
+        `/api/v1/admin/nodes?network=${encodeURIComponent(net)}${ownerQuery}`,
+      );
     },
     enabled: network !== null,
     refetchInterval: POLL_INTERVAL_MS,

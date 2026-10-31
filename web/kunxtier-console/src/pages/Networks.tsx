@@ -8,6 +8,7 @@
 import { useState, type FormEvent } from "react";
 import { errorMessage } from "@/api/client";
 import { useCreateNetworkMutation, useNetworksQuery } from "@/api/hooks";
+import ErrorHint from "@/components/ErrorHint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,6 +72,10 @@ export default function NetworksPage() {
 
       {networksQuery.isLoading ? (
         <p className="text-sm text-muted-foreground">网络组加载中</p>
+      ) : networksQuery.isError ? (
+        <ErrorHint error={networksQuery.error} onRetry={() => void networksQuery.refetch()} />
+      ) : networks.length === 0 ? (
+        <p className="text-sm text-muted-foreground">暂无网络组, 经上方表单创建第一个网络组</p>
       ) : (
         <div
           className={cn(

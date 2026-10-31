@@ -6,6 +6,7 @@
  */
 
 import { useRelaysQuery } from "@/api/hooks";
+import ErrorHint from "@/components/ErrorHint";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,8 @@ export default function RelaysPage() {
 
       {relaysQuery.isLoading ? (
         <p className="text-sm text-muted-foreground">中继加载中</p>
+      ) : relaysQuery.isError ? (
+        <ErrorHint error={relaysQuery.error} onRetry={() => void relaysQuery.refetch()} />
       ) : relays.length === 0 ? (
         <p className="text-sm text-muted-foreground">暂无中继条目</p>
       ) : (

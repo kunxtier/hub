@@ -25,6 +25,14 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+/**
+ * AppContext 的具名 Provider 包裹 (规范: 禁止在组件 JSX 中匿名编写 XxxContext.Provider)。
+ * 供 AppProvider 挂载会话与网络组状态。
+ */
+function AppContextProvider({ value, children }: { value: AppContextValue; children: ReactNode }) {
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
 /** 会话与网络组状态提供方 (刷新经 sessionStorage 恢复会话, 服务端过期由 401 兜底)。 */
 export function AppProvider({ children }: { children: ReactNode }) {
   const [authed, setAuthed] = useState(() => getToken() !== null);
@@ -54,7 +62,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [authed, login, logout, network],
   );
 
-  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+  return <AppContextProvider value={value}>{children}</AppContextProvider>;
 }
 
 /** 读取会话与网络组状态; 必须在 AppProvider 内使用。 */

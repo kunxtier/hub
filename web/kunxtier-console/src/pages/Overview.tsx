@@ -6,6 +6,8 @@
  */
 
 import { useNetworksQuery, useNodesQuery, useRelaysQuery } from "@/api/hooks";
+import type { PathStatus, PeerPathReport } from "@/api/types";
+import ErrorHint from "@/components/ErrorHint";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { PATH_LABELS, formatTime, summarizePaths } from "@/lib/summary";
@@ -30,19 +32,34 @@ export default function OverviewPage() {
       <div>
         <h1 className="text-lg font-semibold">总览</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">
-          {network !== null ? `网络组 ${network}${cidr ? ` (${cidr})` : ""}` : "加载网络组中"}
+          {networksQuery.isError
+            ? "网络组加载失败"
+            : network !== null
+              ? `网络组 ${network}${cidr ? ` (${cidr})` : ""}`
+              : "加载网络组中"}
         </p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile label="在线节点" value={`${onlineCount} / ${nodes.length}`} />
-        <StatTile label="直连路径" value={String(paths.direct)} />
-        <StatTile label="中继路径" value={String(paths.relayed)} />
-        <StatTile label="在线卫星" value={`${satelliteCount} 个`} />
+        <StatTile
+          label="在线节点"
+          value={nodesQuery.isError ? "加载失败" : `${onlineCount} / ${nodes.length}`}
+        />
+        <StatTile label="直连路径" value={nodesQuery.isError ? "加载失败" : String(paths.direct)} />
+        <StatTile
+          label="中继路径"
+          value={nodesQuery.isError ? "加载失败" : String(paths.relayed)}
+        />
+        <StatTile
+          label="在线卫星"
+          value={relaysQuery.isError ? "加载失败" : `${satelliteCount} 个`}
+        />
       </div>
 
       {nodesQuery.isLoading ? (
         <p className="text-sm text-muted-foreground">节点加载中</p>
+      ) : nodesQuery.isError ? (
+        <ErrorHint error={nodesQuery.error} onRetry={() => void nodesQuery.refetch()} />
       ) : nodes.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           当前网络暂无节点, 签发令牌后用 kunxtier up 接入
@@ -98,8 +115,8 @@ export default function OverviewPage() {
 }
 
 /** 单节点路径概况文本 (按词汇计数压缩展示)。 */
-function summarizeNodePaths(paths: { path: string }[]): string {
-  const counts = new Map<string, number>();
+function summarizeNodePaths(paths: PeerPathReport[]): string {
+  const counts = new Map<PathStatus, number>();
   for (const report of paths) {
     counts.set(report.path, (counts.get(report.path) ?? 0) + 1);
   }

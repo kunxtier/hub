@@ -2,7 +2,7 @@ id: "REF-kunxtier-console-frontend-rules-052034"
 type: "refactor"
 slug: "kunxtier-console-frontend-rules"
 title: "控制台前端规范合规整改 (react/typescript/tailwindcss/basic-ui)"
-status: "open"
+status: "done"
 priority: "medium"
 owner: "FE"
 tags:

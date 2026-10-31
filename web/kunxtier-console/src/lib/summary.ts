@@ -5,10 +5,10 @@
  * Created: 2026-10-27
  */
 
-import type { NodeInfo } from "@/api/types";
+import type { NodeInfo, PathStatus } from "@/api/types";
 
-/** 路径状态中文标签 (词汇与 PeerPathReport.path / status 一致)。 */
-export const PATH_LABELS: Record<string, string> = {
+/** 路径状态中文标签 (键与 PeerPathReport.path 封闭词汇一致)。 */
+export const PATH_LABELS: Record<PathStatus, string> = {
   idle: "空闲",
   punching: "打洞中",
   direct: "直连",

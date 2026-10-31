@@ -64,7 +64,8 @@ export function setToken(token: string | null): void {
   }
 }
 
-/** 从任意抛出错误提取用户可读文案 (mutation / query 错误展示统一入口)。 */
+/** 从任意抛出错误提取用户可读文案 (mutation / query 错误展示统一入口, 纯投影无副作用;
+ * 网络层失败的留痕在 api() 的 fetch 捕获处完成)。 */
 export function errorMessage(err: unknown): string {
   return err instanceof ApiRequestError ? err.message : "操作失败, 请重试";
 }
@@ -86,11 +87,18 @@ export async function api<T>(path: string, init: ApiRequestInit = {}): Promise<T
   if (sessionToken) {
     headers["Authorization"] = `Bearer ${sessionToken}`;
   }
-  const resp = await fetch(path, {
-    method: init.method ?? (init.json !== undefined ? "POST" : "GET"),
-    headers,
-    body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      method: init.method ?? (init.json !== undefined ? "POST" : "GET"),
+      headers,
+      body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
+    });
+  } catch (err) {
+    // 网络层失败 (断连 / DNS / 请求中断): 留痕后原样上抛, 由调用方归入 error 态
+    console.warn("[kunxtier-console] 请求未送达", path, err);
+    throw err;
+  }
   if (resp.status === 401) {
     setToken(null);
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));

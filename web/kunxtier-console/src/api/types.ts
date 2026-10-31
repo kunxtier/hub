@@ -27,12 +27,23 @@ export interface NetworkInfo {
   created_at: number;
 }
 
+/**
+ * 逐对端路径状态 (封闭词汇, 契约投影)。
+ * 后端 protocol.rs 透传节点上报字符串, 不在服务端校验; 若未来节点上报新词汇,
+ * 前端按原样降级展示 (标签回退原词, 计数不计入), 以本投影过期为信号对齐契约。
+ * - idle: 空闲 (无活跃路径)
+ * - punching: 打洞进行中
+ * - direct: 直连已建立
+ * - relayed: 经中继转发
+ */
+export type PathStatus = "idle" | "punching" | "direct" | "relayed";
+
 /** 逐对端路径快照 (节点路径上报的聚合条目)。 */
 export interface PeerPathReport {
   /** 对端节点名。 */
   peer: string;
-  /** idle / punching / direct / relayed (与 status 词汇一致)。 */
-  path: string;
+  /** 路径状态 (与 status 词汇一致)。 */
+  path: PathStatus;
   /** 走中继时的中继地址 (与中继列表条目 addr 一致); 其余路径缺省。 */
   relay?: string;
 }
