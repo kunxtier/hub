@@ -22,13 +22,15 @@ export default function LoginPage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!credential || submitting) {
+    // 凭证为高熵 token, 不含空白; 首尾空格多为粘贴带入, 提交前剔除
+    const trimmed = credential.trim();
+    if (!trimmed || submitting) {
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      await login(credential);
+      await login(trimmed);
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : "登录失败, 请重试");
       setSubmitting(false);
@@ -63,7 +65,7 @@ export default function LoginPage() {
           type="submit"
           variant="primary"
           className="mt-5 w-full"
-          disabled={submitting || !credential}
+          disabled={submitting || !credential.trim()}
         >
           {submitting ? "登录中" : "登录"}
         </Button>
