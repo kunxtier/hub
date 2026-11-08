@@ -11,7 +11,7 @@
 ### kunxtier (轻量私有虚拟网)
 
 - feat-kunxtier-network.md: 组网与连通性
-- feat-kunxtier-access.md: 用户与设备接入管理
+- feat-kunxtier-access.md: 设备接入管理 (令牌直连)
 - feat-kunxtier-cli.md: CLI 与运维形态
 - feat-kunxtier-console.md: Web 控制台
 - nfr-kunxtier-security.md: 安全基线

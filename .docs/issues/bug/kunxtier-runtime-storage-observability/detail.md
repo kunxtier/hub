@@ -45,6 +45,7 @@
 | journal 凭证留存提示 | `init.rs:20` 注释, `cli/relay.rs:143-150` | 服务化启动时 admin 凭证 eprintln 可能进 journal; 设计内一次性交付, 需评估服务化场景改文件-only 提示 |
 | 心跳间隔内联硬编码 | `satellite.rs:490-492` | `Duration::from_secs(10)` 内联在 select 循环, 同文件其余策略参数已收常量区 |
 | 超限多职责文件 | `store.rs` 1167 行, `runtime.rs` 1154 行, `signaling.rs` 816 行, `daemon.rs` 736 行 | 超 300 行拆分信号, store/runtime 承载多职责 |
+| SQLite 文件无显式权限 (已知边界, 不修) | `store.rs` `Connection::open` 后未 set_permissions | db 按进程 umask 落盘 (常见 0644), 含令牌/凭证哈希; 保护机制为 state 目录 0700; WAL 的 -wal/-shm 为运行期动态创建, 无法逐个预设权限, 文件级 0600 做不干净亦无必要; e2e 文档 S1 口径已同步 (2026-11-06 核验 e2e-kunxtier-single 时发现) |
 
 ## 非目标
 

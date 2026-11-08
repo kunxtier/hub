@@ -2,11 +2,14 @@
 
 ## 背景
 
-kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区分: relay (核心中继, 默认; `--satellite` 为纯转发卫星)、console (无状态控制台)、daemon (节点守护进程) 与管理 CLI。交叉编译分发, 目标是零依赖部署: 任何角色都不依赖系统安装的组件 (包括系统 WireGuard 工具链)。relay + daemon 即闭环, 其余子命令是体验增强。
+kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区分: relay (核心中继; 环境变量 `KUNXTIER_RELAY_TOKEN` 存在时为纯转发卫星)、console (无状态控制台)、daemon (节点守护进程) 与管理 CLI。交叉编译分发, 目标是零依赖部署: 任何角色都不依赖系统安装的组件 (包括系统 WireGuard 工具链)。relay + daemon 即闭环, 其余子命令是体验增强。
+
+2026-11-06 决策: relay 子命令零配置类 flag, 持久运行配置统一 ENV > CONFIG > DEFAULT, CLI 只承载一次性动作参数; 卫星模式由 relay 令牌存在性决定, 不设独立开关; `--init` 移除 (首启自动初始化已内建)。
 
 ## 目标
 
 - 单二进制覆盖全部角色: 核心中继 (含控制台托管)、卫星中继、无状态控制台、节点守护进程、管理 CLI
+- `kunxtier config` 感知本机配置文件位置并打印生效配置
 - 常用操作 (上线 / 下线 / 查看状态) 一条命令完成; daemon 可注册为系统服务开机自启
 - 管理操作 (网络 / 用户 / 令牌 / 节点 / 策略) CLI 与控制台双入口
 - 核心中继与卫星均可在裸机器上以 systemd / launchd 直接拉起; 部署位置不限, 硬要求只有目标端可达
@@ -17,14 +20,14 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 ### 首次部署核心中继
 
 1. 拷贝二进制到目标机器 (通常是节点都可达的一台公网机器, 但这不是架构约束)
-2. `kunxtier relay` 启动: 数据目录未初始化时自动完成初始化 (自签证书 / admin 凭证 / 默认网络组), 凭证同时写入 state 目录 `admin-credential` (0600); 也可先显式执行 `kunxtier relay --init`
+2. `kunxtier relay` 启动 (零配置类 flag): 配置取 env > `/etc/kunxtier/relay.toml` > 平台默认; 数据目录未初始化时自动完成初始化 (自签证书 / admin 凭证 / 默认网络组), 凭证同时写入 state 目录 `admin-credential` (0600)
 3. 由 systemd (Linux) / launchd (macOS) 托管; 浏览器打开即得控制台
 
 ### 扩展卫星中继 (可选)
 
 1. 拷贝二进制到中继机器
 2. admin 在控制台或 CLI 签发 relay 注册令牌 (可复用)
-3. `kunxtier relay --satellite --core <核心地址> --token <relay-token>` 启动, 注册进核心的中继列表
+3. 设置 `KUNXTIER_RELAY_TOKEN` (及核心地址 / 指纹, 走 env 或配置文件) 后执行 `kunxtier relay`, 注册进核心的中继列表; 令牌存在即卫星模式, 无独立开关
 
 ### 使用控制台 (可选)
 
@@ -40,7 +43,7 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 
 ### 管理员运维
 
-1. `kunxtier admin network / user / token / node / policy / relay <subcommand>` 完成网络、用户、令牌、节点、策略与中继管理
+1. `kunxtier admin network / token / node / policy / relay <subcommand>` 完成网络、令牌、节点、策略与中继管理
 2. `kunxtier admin node list` 查看全网节点概览; `kunxtier admin relay status` 查看卫星中继注册状态与负载
 
 ### 数据运维
@@ -52,32 +55,31 @@ kunxtier 的全部角色聚合为单一二进制 `kunxtier`, 通过子命令区�
 
 ```sh
 # ── 核心中继 (一个网络一个, 部署位置不限, 443/tcp) ─────────────
-kunxtier relay                                   # 启动核心中继: 管理 + 信令 + 内置转发 + 控制台托管; 首启自动初始化 (凭证写入 state/admin-credential)
-kunxtier relay --init                            # (可选) 显式预初始化: 状态目录/自签证书/admin 凭证/默认网络组
-kunxtier relay --config /etc/kunxtier/relay.toml # 指定配置文件 (监听地址/数据目录等长期配置)
-kunxtier relay backup                            # 导出一致性备份 (SQLite 快照, 用于迁移与恢复)
+kunxtier relay                                   # 启动核心中继: 管理 + 信令 + 内置转发 + 控制台托管; 首启自动初始化 (凭证写入 state/admin-credential); 零配置类 flag, 配置 = env > /etc/kunxtier/relay.toml > 默认
+kunxtier relay backup <path>                     # 导出一致性备份 (SQLite 快照, 用于迁移与恢复)
 
 # ── 卫星中继 (可选, 可多个, 纯转发) ───────────────────────────
-kunxtier relay --satellite --core wss://core.example.com --token <relay-token>
+KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay   # relay 令牌存在即卫星模式; 核心地址/指纹走 env 或配置文件
+
+# ── 配置感知 ──────────────────────────────────────────────────
+kunxtier config                                  # 显示本机配置文件位置 (relay.toml / 全局 config.toml) 并打印生效配置 (env > 文件 > 默认合并终值, 敏感字段脱敏)
 
 # ── 控制台 (可选, 无状态, 随处可起) ───────────────────────────
 kunxtier console --relay wss://core.example.com  # 本机起控制台, 与直开核心页面行为等价
 
 # ── 节点 ──────────────────────────────────────────────────────
-kunxtier up --token <token> --name laptop        # 首次注册并连接 (令牌一次性, 绑定网络)
+kunxtier up --token <token> --name laptop        # 首次注册并连接 (令牌一次性, 绑定网络; --token/--name 为一次性动作参数)
 kunxtier status                                  # 本机与对端状态 (路径 direct / relay)
 kunxtier status --verbose                        # 排障视图: 最近路径事件与打洞失败原因
 kunxtier down                                    # 断开
-kunxtier daemon                                  # 前台运行守护进程 (通常由 install 的服务拉起; 本地开发需显式 --state-dir)
+kunxtier daemon                                  # 前台运行守护进程 (通常由 install 的服务拉起; 本地开发设 KUNXTIER_STATE_DIR 指向工作目录)
 kunxtier install                                 # 注册系统服务 + 开机自启 (首次生成全局配置; 需 root)
 kunxtier uninstall                               # 停服并移除服务注册 (state 与全局配置保留)
 
 # ── 管理 (admin 凭证走 env 或独立文件) ────────────────────────
 kunxtier admin network create [--cidr 100.66.0.0/16]  # 建网络组 (地址段默认按创建顺序递增)
 kunxtier admin network list                           # 网络组列表
-kunxtier admin user create --network <net>            # 在网络内创建用户 (属主标注)
-kunxtier admin user disable --user <name>             # 禁用用户 (令牌失效 + 设备凭证吊销)
-kunxtier admin token issue --user <name>              # 签发一次性注册令牌 (绑定该用户的网络)
+kunxtier admin token issue --network <net>            # 签发一次性注册令牌 (绑定网络)
 kunxtier admin token issue --type relay               # 签发可复用的卫星注册令牌
 kunxtier admin token revoke --token <id>              # 撤销令牌
 kunxtier admin node list [--network <net>]            # 节点概览 (属主 / 在线 / 路径)
@@ -98,34 +100,35 @@ kunxtier admin relay status                           # 卫星中继注册状态
 | Linux / macOS | /etc/kunxtier/config.toml | /var/lib/kunxtier | /var/log/kunxtier |
 | Windows | %ProgramData%\kunxtier\config.toml (随平台切片) | — | — |
 
-- 配置字段: `state_dir` / `log_dir` / `log_level`; 同一字段优先级 CLI flag > 环境变量 > 全局配置 > 平台默认 (FR-7)
+- 配置字段: `state_dir` / `log_dir` / `log_level`; 同一字段优先级环境变量 > 全局配置 > 平台默认 (FR-7); 本地开发用 `KUNXTIER_STATE_DIR` 覆盖, 不提供 --state-dir flag
 - 配置文件缺失时全默认可用; install 或 daemon 首启 (平台默认目录形态, 无 CLI / env 覆盖) 以默认值显式生成 (0644, 可读可改), 已存在则只校验不改写
-- daemon 非 root 前台启动在机器级目录遇权限不足时, 明确指引 sudo 前台运行 / `--state-dir` 本地开发 / `sudo kunxtier install` 服务化三条出路
+- daemon 非 root 前台启动在机器级目录遇权限不足时, 明确指引 sudo 前台运行 / `KUNXTIER_STATE_DIR` 本地开发 / `sudo kunxtier install` 服务化三条出路
 - 服务定义只固化二进制路径与日志文件位置 (平台日志目录下应用子目录), state 目录运行时读全局配置, 保持单一事实源
 - IPC socket 位于 state 目录; 服务以 root 运行时目录 0755、身份与私钥文件 0600、socket 0666——本机已登录用户即可执行 up / down / status (up 仍需令牌), 私钥不出信任域
-- 本地开发 (免提权) 跑 daemon 时需显式 `--state-dir` 指向工作目录
+- 本地开发 (免提权) 跑 daemon 时设 `KUNXTIER_STATE_DIR` 指向工作目录
 
 ## 功能要求
 
 | 编号 | 说明 | 验收标准 |
 | ---- | ---- | -------- |
-| FR-1 | 子命令覆盖 relay / console / daemon / up / down / status / admin / install / uninstall | `kunxtier --help` 可发现全部子命令, 无需额外记忆 |
+| FR-1 | 子命令覆盖 relay / console / daemon / up / down / status / admin / install / uninstall / config | `kunxtier --help` 可发现全部子命令, 无需额外记忆 |
 | FR-2 | up / down / status 与本机 daemon 通过本地 IPC 通信 | daemon 未运行时给出明确提示与启动指引 |
 | FR-3 | relay 核心模式单进程承载多网络组管理、信令、内置转发与控制台托管 | 无需拆分部署即可获得完整闭环 (含打洞回落路径); init 自动创建默认网络组 |
 | FR-4 | relay 卫星模式为纯转发角色, 以可复用 relay 令牌向核心注册 | 注册后自动进入全网中继列表, 无需改核心配置, 无本地管理数据 |
 | FR-5 | console 子命令为无状态控制台宿主 | 在任意机器启动, 连接核心 admin API, 行为与直接访问核心托管页面等价 |
 | FR-6 | 首次初始化自动生成密钥材料 | 生成结果落在 state 目录并设置严格文件权限 (0600) |
-| FR-7 | 配置遵循 CLI > ENV > CONFIG > DEFAULT 分层 | 同一字段多层出现时按该优先级生效, 行为有单元测试覆盖 |
+| FR-7 | 持久运行配置统一 ENV > CONFIG > DEFAULT 分层; CLI 只承载一次性动作参数 (up 的 --token/--name、backup 的路径), 不承载持久配置 | relay / daemon 子命令无配置类 flag; 同一字段多层出现时 env > 配置文件 > 默认生效, 行为有单元测试覆盖 |
 | FR-8 | macOS / Linux / Windows 三平台发布产物 | 提供可交叉编译的统一构建入口 |
 | FR-9 | daemon 服务化: install / uninstall 注册系统服务 (macOS launchd / Linux systemd) 与开机自启 | 系统重启后 daemon 自动恢复并上线; uninstall 停服并清理服务定义, state 与全局配置保留; 三平台特权要求 (Windows 管理员 / macOS root / Linux root) 在文档与安装提示中明确 |
 | FR-10 | 数据与状态可迁移可备份: SQLite 带 schema 版本并只做前向迁移; 节点 state 文件带版本字段; `relay backup` 导出一致性备份 | 新版本二进制打开旧库自动迁移不丢数据; 备份文件可在新机恢复出完整网络状态 |
 | FR-11 | 节点侧机器级全局配置承载 state_dir / log_dir / log_level (见 "全局配置与目录布局") | 配置缺失全默认可用; install / daemon / up / down / status 读取一致; 优先级与非法值拒绝行为有单元测试覆盖 |
+| FR-12 | `kunxtier config` 配置感知: 显示本机各域配置文件位置 (relay.toml / 全局 config.toml) 并打印生效配置 (env > 文件 > 默认合并终值) | 位置与合并终值与实际运行行为一致; 敏感字段 (令牌 / 凭证 / 私钥) 脱敏输出 |
 
 ## 边界与约束
 
 - Web 控制台的功能需求由 feat-kunxtier-console 承载, 本文档只约定入口与部署形态
 - daemon 服务化只覆盖 daemon 角色; relay / console / 卫星由系统单元 (systemd / launchd) 直接托管
-- relay 配置维持独立 relay.toml 分层, 不并入机器级全局配置; 两者统一作为独立演进项评估
+- relay 配置为固定路径 `/etc/kunxtier/relay.toml` 自动发现 (无 --config flag), 不并入机器级全局配置; 敏感字段 (relay 令牌) 仍只走 env
 - Windows 的服务注册随 Windows 平台支持落地, 现阶段 install 在 Windows 明确报错占位
 - relay 的验证环境为 Linux; macOS 声明支持, Windows 上运行 relay 不在 MVP 验证范围
 - 核心中继监听地址、数据目录等长期配置走配置文件; TLS 私钥、admin 凭证、relay 令牌走 env 或独立文件

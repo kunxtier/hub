@@ -42,7 +42,7 @@
 kunxtier relay --init --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
 ```
 
-- 预期: 生成 state 目录, 自签证书与 admin 凭证明文仅展示一次; 默认网络组已创建; 私钥与 SQLite 权限 0600
+- 预期: 生成 state 目录 (0700), 自签证书与 admin 凭证明文仅展示一次; 默认网络组已创建; 私钥与 admin 凭证 0600 (SQLite 文件未单独设权, 由 0700 目录兜底)
 - 记录 `<fp>` 与 `$ADMIN`
 - 启动: `kunxtier relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state` 前台常驻 (验证期间保持运行)
 
@@ -53,7 +53,7 @@ export KUNXTIER_ADMIN=$(cat ./kunxtier-state/admin-credential)   # 错过 init �
 kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> network list          # 默认网络
 kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> network create net2 --cidr 100.67.0.0/16
 kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> user create --network default --name u1
-kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> token issue --network default                 # 一次性节点令牌
+kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> token issue --network default --user u1       # 一次性节点令牌 (node 令牌必须绑定用户)
 kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> token issue --network default --type relay    # 卫星令牌 (留多机文档用)
 kunxtier admin --server https://127.0.0.1:9443 --fingerprint <fp> node list
 ```
@@ -103,7 +103,7 @@ sudo kunxtier up --state-dir ./kunxtier-node-state                 # 已注册�
 | 恶意指纹 | `--fingerprint` 改一位 hex 后 `up` | 连接被拒, 提示指纹不匹配 |
 | 节点移除后凭证失效 | `admin node remove --network default --name solo` 后观察 daemon | 信令被拒 (凭证已吊销), 网内流量停止 |
 | 禁用用户 | `admin user disable --network default --name u1` | 其名下设备凭证吊销、重连被拒, 令牌全部失效 |
-| 令牌暴力限速 | 脚本连续提交错误令牌注册 (如 shell 循环 20 次) | 达阈值后被限速 / 退避并返回明确错误; 正常客户端不受影响 |
+| 令牌暴力限速 | 脚本连续提交错误令牌注册 (如 shell 循环 10 次以上; 注册限速 10 次/分, admin 认证失败限速另有独立阈值) | 达阈值后被限速 / 退避并返回明确错误; 正常客户端不受影响 |
 | admin API 鉴权边界 | 用节点凭证 (state 内) 调 admin API | 被拒, 凭证类型不互通 |
 
 ## S7 控制台双入口冒烟

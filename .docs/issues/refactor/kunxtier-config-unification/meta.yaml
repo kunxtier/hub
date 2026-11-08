@@ -1,0 +1,13 @@
+id: "REF-kunxtier-config-unification-58cae6"
+type: "refactor"
+slug: "kunxtier-config-unification"
+title: "relay 零参数与持久配置统一 env 最高及 config 感知"
+status: "open"
+priority: "high"
+owner: "CORE"
+tags:
+  - "kunxtier"
+  - "product"
+  - "config"
+created_at: "2026-11-06"
+updated_at: "2026-11-08"
