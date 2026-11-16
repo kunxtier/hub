@@ -32,8 +32,8 @@ test: ## rust 域全量测试
 verify: ## 一键检查全部项目 (格式 + 静态检查 + 编译 + 测试; 当前 rust, 新项目追加调用行)
 	cd rust/kunxtier && cargo make verify
 
-# 开发热更: 前置 rust/kunxtier 已 relay-init 且装好 cargo-watch, web/kunxtier-console 已 pnpm install。
-# 浏览器访问 http://127.0.0.1:5173, /api 由 Vite 代理到核心中继 9443。
+# 开发热更: 前置 rust/kunxtier 已装好 cargo-watch, web/kunxtier-console 已 pnpm install。
+# relay 侧先 export KUNXTIER_LISTEN=127.0.0.1:9443 (及按需 KUNXTIER_DATA_DIR); 浏览器访问 http://127.0.0.1:5173, /api 由 Vite 代理到核心中继 9443。
 
 dev-relay: ## 核心中继热编译重启 (委托 cargo make relay-watch)
 	cd rust/kunxtier && cargo make relay-watch

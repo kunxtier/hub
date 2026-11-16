@@ -8,7 +8,7 @@
   - kunxtier-core: 协议消息 (信令 / 转发帧 / 卫星注册) / 凭证与令牌 / 地址分配 / 分层配置 / TLS 指纹固定
   - kunxtier-relay: 核心中继 (登记 / 信令 WS / 管理 API / 转发双模式 / 卫星注册分发 / 自签 TLS / 限速 / 备份)
   - kunxtier-node: 节点数据面 (WG 用户态引擎 gotatun + tun-rs TUN 适配 + 复合传输 / STUN / 打洞 / 路径策略 / 信令客户端与运行时 + daemon 会话与本地 IPC / state 持久化 / 关键事件留痕与 status --verbose; 进度见 issue FEAT-kunxtier-core-runtime-a580d1)
-  - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / console / daemon / up / down / status)
+  - kunxtier-cli: 单一入口二进制 `kunxtier` (relay / admin / config / console / daemon / up / down / status)
   - web/kunxtier-console (控制台前端): React + TS + Vite + Tailwind + shadcn, pnpm; 产物输出 relay assets/console 嵌入 (include_dir 编译期读入), `cargo make build` 一键完成: 编译前先构建前端 (失败即中断), 产物更新后需重启进程生效
 - 规划文档: `.docs/` (requirements / architectures / testing / issues)
 
@@ -18,15 +18,19 @@
 cd rust/kunxtier
 cargo build
 cargo test
-# 本地试跑 (避免 443 权限问题, 指定高位端口; 首启自动初始化, admin 凭证写入 state/admin-credential)
-cargo run -p kunxtier-cli --bin kunxtier -- relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
-# 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发)
-KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <核心地址> --fingerprint <核心指纹> --advertise <对外地址>
-# 节点 (daemon 常驻, up 需特权 TUN; state 目录默认读全局配置: macOS/Linux 统一 /etc/kunxtier/config.toml + /var/lib/kunxtier, 日志 /var/log/kunxtier)
-kunxtier daemon --state-dir ./kunxtier-node-state &   # 本地开发前台守护进程; 另一终端执行:
-kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹> --state-dir ./kunxtier-node-state
-kunxtier status --state-dir ./kunxtier-node-state && kunxtier down --state-dir ./kunxtier-node-state
+# 本地试跑 (避免 443 权限问题, 指定高位端口; 裸命令零配置类 flag, 首启自动初始化, admin 凭证写入 state/admin-credential)
+KUNXTIER_LISTEN=127.0.0.1:9443 KUNXTIER_DATA_DIR=./kunxtier-state cargo run -p kunxtier-cli --bin kunxtier -- relay
+# 卫星中继 (纯转发; relay 令牌经 admin token issue --type relay 签发; 令牌非空即卫星模式)
+KUNXTIER_RELAY_TOKEN=<relay-token> KUNXTIER_CORE=<核心地址> KUNXTIER_FINGERPRINT=<核心指纹> KUNXTIER_ADVERTISE=<对外地址> kunxtier relay
+# 节点 (daemon 常驻, 需特权 TUN; state 目录默认读全局配置: macOS/Linux 统一 /etc/kunxtier/config.toml + /var/lib/kunxtier, 日志 /var/log/kunxtier; 本地开发以 KUNXTIER_STATE_DIR 指向工作目录)
+sudo KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier daemon &   # 本地开发前台守护进程; 另一终端执行:
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier up --token <一次性令牌> --name laptop --core <核心地址> --fingerprint <核心指纹>
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier status   # up / status / down 经 IPC 免 sudo (socket 0666)
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier down
 # 服务化 (生产): sudo kunxtier install 注册系统服务与开机自启 (首次生成全局配置); kunxtier uninstall 反向清理 (state 与配置保留)
+# 配置感知: 配置文件位置 (relay.toml / config.toml) 与生效配置终值 (env > 文件 > 默认; 令牌/凭证脱敏)
+kunxtier config                                   # 只读打印生效配置
+kunxtier config init [--relay|--node]             # 生成缺失的默认配置模板 (缺省两域; 已存在不改写)
 
 # 本地 Web 控制台 (托管页面并反代核心 admin API; 核心中继亦直接托管同一页面)
 kunxtier console --relay <核心地址> --fingerprint <核心指纹>

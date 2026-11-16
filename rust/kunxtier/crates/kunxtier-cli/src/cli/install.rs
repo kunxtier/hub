@@ -35,7 +35,7 @@ impl InstallArgs {
                     node_config_path().display()
                 ))
             })?;
-        let config = NodeGlobalConfig::resolve(None, |_| None, file);
+        let config = NodeGlobalConfig::resolve(|_| None, file);
         let spec = ServiceSpec {
             bin,
             log_file: config.log_dir.join("daemon.log"),

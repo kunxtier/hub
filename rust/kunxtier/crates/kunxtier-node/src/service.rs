@@ -556,7 +556,7 @@ mod tests {
             &kunxtier_core::config::node_config_path(),
         )
         .unwrap();
-        let config = kunxtier_core::config::NodeGlobalConfig::resolve(None, |_| None, file);
+        let config = kunxtier_core::config::NodeGlobalConfig::resolve(|_| None, file);
         let spec = ServiceSpec {
             bin: bin.into(),
             log_file: config.log_dir.join("daemon.log"),

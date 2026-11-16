@@ -1,4 +1,4 @@
-//! Description: relay --init: 状态目录初始化 (自签证书 / admin 凭证 / 默认网络)。
+//! Description: 状态目录初始化 (自签证书 / admin 凭证 / 默认网络), relay 首启自动执行。
 //!
 //! Author: qinzhenya
 //! Created: 2026-10-21
@@ -13,7 +13,7 @@ use crate::cert;
 use crate::store::Store;
 use crate::{Error, Result};
 
-/// `relay --init` 的产出; 明文凭证只在这里展示一次。
+/// 初始化流程的产出; 明文凭证只在首启展示一次。
 pub struct InitOutput {
     pub admin_credential: String,
     pub fingerprint: String,
@@ -108,7 +108,7 @@ pub fn init(cfg: &RelayConfig) -> Result<InitOutput> {
 }
 
 /// 运行模式启动前置: 未初始化则就地进行 init, 返回 Some(首启产出);
-/// 已初始化返回 None, 不做任何变更。免记忆 `relay --init` 前置命令。
+/// 已初始化返回 None, 不做任何变更。裸命令首启自动初始化, 无前置命令。
 /// 并发首启撞锁时直接报错 (持有方必在执行中, 无残留态): 由服务管理器重启重试,
 /// 对方完成后本进程即按已初始化通过。
 pub fn ensure_initialized(cfg: &RelayConfig) -> Result<Option<InitOutput>> {

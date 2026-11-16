@@ -40,27 +40,31 @@ macOS / Linux 同构 (unix daemon 惯例; 2026-10-27 布局修订, 原 macOS /Li
 └── admin-credential   # 0600  admin 凭证 (首启 stderr 展示一次, 之后在此找回)
 ```
 
-relay.toml 经 `--config` 显式指定 (无隐式默认路径, 位置不限); 日志文件经 `--log-file` 显式指定。首次运行未初始化时自动就地进行 init (生成上述全部文件), `relay --init` 保留为显式预初始化入口。
+relay.toml 固定机器级路径 `/etc/kunxtier/relay.toml` 自动发现 (无 --config 指定入口, 缺失按全默认处理); 日志文件经 `--log-file` 显式指定 (--log-level / --log-file 为进程级观测参数, 不属持久配置)。首次运行未初始化时自动就地进行 init (生成上述全部文件), 裸命令即唯一入口 (2026-11-06 起 --init 移除)。
 
 ### relay 卫星模式 / console
 
-卫星无状态目录、无管理数据, 注册凭 KUNXTIER_RELAY_TOKEN (仅 env)。console 子命令本地起 HTTP 进程托管嵌入资源并反代 admin API, 无任何落盘。
+卫星无状态目录、无管理数据; 模式由 KUNXTIER_RELAY_TOKEN 非空存在性判定 (无独立开关), 注册凭该令牌 (仅 env)。console 子命令本地起 HTTP 进程托管嵌入资源并反代 admin API, 无任何落盘。
 
 ## 配置设计
 
-统一分层 CLI > ENV > CONFIG > DEFAULT; 空 env 视同未设置; flag 与 CONFIG 层非法值启动即报错; CONFIG 文件缺失按全默认处理, 不视为错误。
+统一分层 ENV > CONFIG > DEFAULT (2026-11-06 反转); 空 env 视同未设置; CLI 只承载一次性动作参数 (up 的 --token/--name、backup 的路径), 不承载持久配置; CONFIG 层非法值启动即报错; CONFIG 文件缺失按全默认处理, 不视为错误。
 
-### relay.toml (--config 显式指定, 全非敏感)
+### relay.toml (机器级固定路径 /etc/kunxtier/relay.toml, 全非敏感)
 
 | 字段 | 类型 | 默认 | 语义 |
 | ---- | ---- | ---- | ---- |
 | listen | SocketAddr | 0.0.0.0:443 | 管理 / 信令 / 转发 / 控制台共用监听 |
 | data_dir | 路径 | ./kunxtier-state | 状态目录 (核心模式) |
 | advertise | SocketAddr | 无 | 对外公布地址 (中继列表内置条目; 缺省取具体监听地址) |
+| core | host:port | 无 | 卫星模式: 核心中继拨号地址 (核心模式不读取) |
+| fingerprint | hex | 无 | 卫星模式: 核心证书指纹, 非机密可落文件 (核心模式不读取) |
 | stun_servers | [host:port] | 公共 STUN 三台 | 整组覆盖缺省列表, 经信令下发节点 |
 | log_level | error..trace | 无 (即 info) | 进程级关注点, 不进运行时配置类型 |
 
-卫星模式复用 listen / advertise 两字段。
+卫星模式复用 listen / advertise / core / fingerprint 字段; relay 令牌仍只走 env。
+
+生成时机: relay.toml 不自动落盘 (缺失即全默认照常运行)——relay 常以 env 覆盖起本地实例, 自动写 /etc 在非 root 场景失败且需引入覆盖判定门槛, 模板生成只走显式 `kunxtier config init [--relay|--node]` (0644, 已存在不改写); 节点 config.toml 另有 daemon 首启 / install 自动生成路径 (见下节)。
 
 ### 节点全局配置 (机器固定路径, install 或 daemon 首启生成默认模板)
 
@@ -70,7 +74,7 @@ relay.toml 经 `--config` 显式指定 (无隐式默认路径, 位置不限); �
 | log_dir | 路径 | 平台日志目录 | install 据此固化 --log-file; CONFIG > DEFAULT, 无 CLI / env 覆盖 |
 | log_level | error..trace | 无 (即 info) | 日志级别链的 CONFIG 层 |
 
-生成时机: daemon 以平台默认目录形态 (无 --state-dir / KUNXTIER_STATE_DIR 覆盖) 启动且文件缺失时, 就地落默认模板 (0644); 显式覆盖 state 目录属本地开发, 不触碰机器级路径。非 root 启动在机器级目录遇权限不足时, 映射 sudo 前台运行 / `--state-dir` / `sudo kunxtier install` 三条出路指引, 不透出裸 io 错误。
+生成时机: daemon 以平台默认目录形态 (无 KUNXTIER_STATE_DIR 覆盖) 启动且文件缺失时, 就地落默认模板 (0644); 显式覆盖 state 目录属本地开发, 不触碰机器级路径。非 root 启动在机器级目录遇权限不足时, 映射 sudo 前台运行 / `KUNXTIER_STATE_DIR` / `sudo kunxtier install` 三条出路指引, 不透出裸 io 错误。
 
 留存机制 (程序对全局配置的完整生命周期语义):
 
@@ -88,7 +92,7 @@ relay.toml 经 `--config` 显式指定 (无隐式默认路径, 位置不限); �
 | KUNXTIER_ADVERTISE | 公布地址 | relay 两模式 | 否 |
 | KUNXTIER_STUN | STUN 列表 (逗号分隔, 整组覆盖) | relay 核心 | 否 |
 | KUNXTIER_CORE | 核心中继地址 | 卫星 / up | 否 |
-| KUNXTIER_RELAY_TOKEN | relay 注册令牌 | 卫星 | 是 (仅 env, 不接受 CLI / 文件) |
+| KUNXTIER_RELAY_TOKEN | relay 注册令牌 (非空存在即卫星模式判定) | 卫星 | 是 (仅 env, 不接受 CLI / 文件) |
 | KUNXTIER_FINGERPRINT | 核心证书指纹 hex | 卫星 / up / admin / console | 否 |
 | KUNXTIER_STATE_DIR | 节点 state 目录 | 节点六命令 | 否 |
 | KUNXTIER_TOKEN | 一次性注册令牌 | up | 是 |
@@ -128,14 +132,14 @@ flag > CONFIG 层 > RUST_LOG > 默认 info, 两角色相同, 仅 CONFIG 层来�
 
 - 配置分层顺序全局固定, 敏感字段只出现在 env / CLI / 0600 文件
 - 目录与权限统一 unix daemon 惯例 (macOS / Linux 同构 /etc + /var/lib + /var/log; macOS 原生路径已弃用)
-- relay 与节点是两套独立配置体系 (relay.toml 显式指定 vs 节点全局配置机器固定), 是否统一机器级布局留独立切片评估
+- relay 与节点是两套独立配置体系 (relay.toml 与节点 config.toml 同处 /etc/kunxtier/ 但各管一个角色, 不合并——2026-11-06 决策)
 - 服务定义只固化二进制绝对路径与 --log-file, 其余运行时读配置, 改配置无需重生成单元 (改 log_dir 除外, 需重跑 install)
 
 ## 取舍与风险
 
 | 主题 | 结论 | 影响 |
 | ---- | ---- | ---- |
-| relay data_dir 默认 CWD 相对 vs 平台固定 | CWD 相对 (与节点不对齐) | 部署者自选位置更自由; 代价是服务化托管 relay 时须显式传目录, 统一机器级布局留独立切片 |
+| relay data_dir 默认 CWD 相对 vs 平台固定 | CWD 相对 (与节点不对齐) | 部署者自选位置更自由; 代价是服务化托管 relay 时须以 relay.toml 或 env 显式指定目录 |
 | macOS 机器布局: /Library/Application Support (ZeroTier 先例) vs unix 统一 /etc + /var | 统一 unix 布局 (2026-10-27 修订) | 终端应用 + 特权服务气质一致, 两平台一套心智; 代价是弃 Finder 可达性与 ZeroTier 先例依据 |
 | daemon 首启生成全局配置 vs 仅 install 生成 | 首启生成 (平台默认目录形态) | 免记忆前置命令, 与 relay 首启自动初始化对称; 代价是 daemon 启动路径多一处写盘 (已存在则不动) |
 | node.json 单文件 vs 凭证 / 私钥拆分多文件 | 单文件 | 原子写保证整体一致, 版本化简单; 代价是权限策略只能文件级统一 0600 |
@@ -144,4 +148,4 @@ flag > CONFIG 层 > RUST_LOG > 默认 info, 两角色相同, 仅 CONFIG 层来�
 | 单份 .old vs 多代轮转 | 单份 (最轻手段) | 不引入轮转库; 代价是只有一段历史, 更久回看靠 journald / 自行重定向 |
 | 事件环内存 vs 落盘 | 内存 (容量 256) | status --verbose 免解析即取、内存有界; 代价是重启清零 |
 | install 显式生成默认配置 vs 全隐式默认 | 显式生成 (0644) | 运维可见可改; 代价是多一个落盘动作与幂等语义要维护 |
-| relay 首启自动初始化 vs 强制 --init | 自动 (init 保留为显式入口) | 免记忆前置命令; 代价是误起进程即在 CWD 建目录 (数据目录可预期, 接受) |
+| relay 首启自动初始化 vs 强制 --init | 自动 (2026-11-06 起 --init 移除, 裸命令唯一入口) | 免记忆前置命令, 命令面最简; 代价是误起进程即在 CWD 建目录 (数据目录可预期, 接受) |

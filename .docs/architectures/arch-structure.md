@@ -55,9 +55,9 @@ hub/
 │       │                         #   + signaling (信令 WS, 候选广播 / 策略推送 / 路径上报聚合) + forward (转发 WS 双准入)
 │       │                         #   + satellite (注册表 + 卫星进程) + session (admin 会话) + console (include_dir 文件表静态托管与本地反代)
 │       │                         #   + assets/console/ (前端构建产物嵌入; 未构建时为随 git 的占位页)
-│       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心 / --satellite 卫星) / admin 子命令 (含 node policy)
+│       ├── kunxtier-cli/         # 二进制 kunxtier: relay (核心; KUNXTIER_RELAY_TOKEN 非空即卫星) / admin 子命令 (含 node policy)
 │       │                         #   + 节点子命令 daemon / up / down / status --verbose (IPC 客户端, state 目录走全局配置) + console (本地控制台)
-│       │                         #   + install / uninstall (T14 服务化) + logging (日志级别与输出目标装配: flag / config / RUST_LOG / 文件轮转)
+│       │                         #   + install / uninstall (T14 服务化) + config (配置文件位置与生效值打印, 敏感脱敏) + logging (日志级别与输出目标装配: flag / config / RUST_LOG / 文件轮转)
 │       └── kunxtier-node/        # 节点数据面: engine + tun + identity + netconf (网段冲突检测)
 │                                 #   + transport (复合传输: UDP 分流 + 中继伪端点) + stun + punch (PING/PONG 探测与路径状态机)
 │                                 #   + relay_conn (转发 WS 客户端) + signal (信令客户端) + runtime (事件循环装配, PathTimings 节奏)
@@ -131,4 +131,5 @@ hub/
 - 流程教训 (T04 带病提交): 提交前必须跑全量 cargo make, 只跑单模块测试曾放过两个缺陷测试 (本次闸门捕获修复)。
 - 2026-10-31 (控制台规范切片, REF-console-frontend-rules): Tokens 页拆分表单域组件 (components/tokens/, 页面降为编排层), ErrorHint 统一查询失败态五页接入, cn 包单一实现替代 clsx+tailwind-merge 自封装 (lib/utils 为 re-export, components.json 别名不变); PathStatus/PathPolicy 字面量联合对齐 protocol.rs 词汇。查询态阶梯抽象与 Panel 卡片原语经评审裁决不做 (各处文案异构, 抽象耦合高于重复成本)。
 - 2026-10-31 (init 互斥, BUG-init-concurrent-race): relay init 进程间互斥 = state 目录常驻 init.lock 上的 flock (LOCK_EX|LOCK_NB; libc 提升为 relay cfg(unix) 直接依赖, EINTR 重试); 互斥先于 Store::open, db 文件创建在互斥内, 保证 cert/key/admin 文件组恒同批次; 进程退出内核自动释放, 无残留锁问题。完成度判定收口为锁内 has_admin (二轮评审裁决): ensure_initialized 移除 db 文件存在性快路径 — db 创建远早于 admin 落库, 半初始化目录 (db 在而无 admin) 会被误判已初始化致 relay 无 admin 起服务, 现此类目录自动补齐。初版 O_EXCL + pid 存活检测自愈方案经 code-review 裁决弃用 (steal 竞态 / Drop 误删他锁 / pid 复用误判 / 空锁不可自愈); SQLite 事务方案弃 (覆盖不了证书文件组); 撞锁直接报错由服务管理器重启重试; 非 unix 保持无互斥 + warn 留痕 (relay 验证平台 Linux)。
+- 2026-11-09 (配置统一, 2026-11-06 决策 REF-kunxtier-config-unification-58cae6): relay 零配置类 flag——删 --listen / --data-dir / --advertise / --core / --fingerprint / --satellite / --init / --config, 留 backup 子命令与 --log-level / --log-file (进程级观测参数, 非持久配置); 卫星模式 = KUNXTIER_RELAY_TOKEN 非空存在性 (无独立开关; KUNXTIER_CORE / KUNXTIER_FINGERPRINT 与 up / admin / console 共用属环境固有变量, 不做冲突校验); relay.toml 固定路径 /etc/kunxtier/relay.toml 自动发现并新增 core / fingerprint 字段; 持久配置优先级反转 ENV > CONFIG > DEFAULT, 节点 --state-dir 移除由 KUNXTIER_STATE_DIR 接管 (daemon 首启生成全局配置的门槛同步改为 env 覆盖判定); 新增 kunxtier config 子命令 (位置感知 + 终值打印 + 令牌/凭证脱敏; `config init [--relay|--node]` 显式生成缺失域默认模板——relay.toml 无自动落盘路径, 与节点 config.toml 的 daemon 首启自动生成刻意不对称); IPC 权限 0755/0600/0666 经核验已在位 (T14 已先行落地, issue 撰写时的 "0700 偏离" 为过期快照)。
 - 环境备注: 2026-10-21 已修正本机 cargo 全局配置 (`CARGO_HOME=/Volumes/Base/LangEnv/rust/.cargo/config.toml`), rsproxy 源由停服的 USTC git 索引改为 `sparse+https://rsproxy.cn/index/`; 缓存按源主机名隔离, 新源首次拉取已重建完成。

@@ -6,7 +6,7 @@
 //! daemon 是常驻服务端 (持有 TUN 与运行时会话); up / down / status 是
 //! 经本地 IPC 的薄客户端, daemon 未运行时给出明确提示与启动指引。
 //! state 目录承载节点身份与 IPC socket, 定位走机器级全局配置
-//! (CLI > ENV > CONFIG > 平台默认, 见 feat-kunxtier-cli "全局配置与目录布局")。
+//! (ENV > CONFIG > 平台默认, 见 feat-kunxtier-cli "全局配置与目录布局")。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use clap::Args;
 
-use kunxtier_core::config::{node_config_path, NodeFileConfig, NodeGlobalConfig};
+use kunxtier_core::config::{
+    node_config_path, NodeFileConfig, NodeGlobalConfig, ENV_NODE_STATE_DIR,
+};
 use kunxtier_core::error::Error as CoreError;
 use kunxtier_node::daemon::{serve, DaemonOptions, TunAdapterFactory};
 use kunxtier_node::events::EventRecord;
@@ -25,18 +27,9 @@ use super::error::Fail;
 /// daemon 重连退避起步值 (指数增长至 30s)。
 const RETRY_BASE: Duration = Duration::from_secs(1);
 
-/// 空 state_dir (如空 env 经 clap 折叠为 Some("")) 视同未设置,
-/// 与配置层 "空 env 视同未设置" 语义对齐。
-fn normalize_state_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
-    dir.filter(|p| !p.as_os_str().is_empty())
-}
-
 /// 解析节点全局配置; 文件缺失走平台默认, 解析失败即时报错。
-fn node_global(cli_state_dir: Option<PathBuf>) -> Result<NodeGlobalConfig, Fail> {
-    NodeGlobalConfig::load(normalize_state_dir(cli_state_dir), |k| {
-        std::env::var(k).ok()
-    })
-    .map_err(|e| {
+fn node_global() -> Result<NodeGlobalConfig, Fail> {
+    NodeGlobalConfig::load(|k| std::env::var(k).ok()).map_err(|e| {
         Fail::usage(format!(
             "全局配置读取失败 ({}): {e}",
             node_config_path().display()
@@ -47,9 +40,6 @@ fn node_global(cli_state_dir: Option<PathBuf>) -> Result<NodeGlobalConfig, Fail>
 /// 前台运行节点守护进程 (通常由终端或 install 的服务拉起)。
 #[derive(Args)]
 pub struct DaemonArgs {
-    /// 节点 state 目录 (缺省读全局配置, 再缺省取平台默认目录)
-    #[arg(long, env = "KUNXTIER_STATE_DIR")]
-    pub state_dir: Option<PathBuf>,
     /// WG 固定监听端口 (缺省首次注册时自动选择并随 state 持久化)
     #[arg(long)]
     pub listen_port: Option<u16>,
@@ -76,23 +66,15 @@ pub struct UpArgs {
     /// 核心证书指纹 hex (首次注册必填)
     #[arg(long, env = "KUNXTIER_FINGERPRINT")]
     pub fingerprint: Option<String>,
-    /// 节点 state 目录 (需与 daemon 一致; 缺省读全局配置)
-    #[arg(long, env = "KUNXTIER_STATE_DIR")]
-    pub state_dir: Option<PathBuf>,
 }
 
 /// 断开网络会话 (daemon 留守, 注册身份保留)。
 #[derive(Args)]
-pub struct DownArgs {
-    #[arg(long, env = "KUNXTIER_STATE_DIR")]
-    pub state_dir: Option<PathBuf>,
-}
+pub struct DownArgs {}
 
 /// 本机与对端状态 (路径 direct / relay)。
 #[derive(Args)]
 pub struct StatusArgs {
-    #[arg(long, env = "KUNXTIER_STATE_DIR")]
-    pub state_dir: Option<PathBuf>,
     /// 排障视图: 附带最近关键事件 (打洞 / 路径 / 信令 / 注册)
     #[arg(long)]
     pub verbose: bool,
@@ -100,10 +82,11 @@ pub struct StatusArgs {
 
 impl DaemonArgs {
     pub fn execute(self) -> Result<(), Fail> {
-        let global = node_global(self.state_dir.clone())?;
-        // 首启生成全局配置: 仅平台默认目录形态 (无 CLI / env 覆盖) 落默认模板;
-        // 显式 --state-dir 属本地开发, 不触碰机器级路径
-        if normalize_state_dir(self.state_dir.clone()).is_none() {
+        let global = node_global()?;
+        // 首启生成全局配置: 仅平台默认目录形态 (无 env 覆盖) 落默认模板;
+        // KUNXTIER_STATE_DIR 覆盖属本地开发, 不触碰机器级路径
+        let env_override = matches!(std::env::var(ENV_NODE_STATE_DIR), Ok(v) if !v.is_empty());
+        if !env_override {
             let path = node_config_path();
             let generated = NodeFileConfig::ensure_written(&path).map_err(|e| match e {
                 CoreError::Io(err) if err.kind() == io::ErrorKind::PermissionDenied => {
@@ -147,7 +130,7 @@ fn daemon_start_fail(e: kunxtier_node::Error) -> Fail {
 fn daemon_permission_hint() -> Fail {
     Fail::usage(
         "权限不足: daemon 需要 TUN 特权与机器级目录写权限; 前台运行请 sudo kunxtier daemon, \
-         本地开发可用 --state-dir 指定工作目录, 生产环境请 sudo kunxtier install 注册系统服务",
+         本地开发可用 KUNXTIER_STATE_DIR 指定工作目录, 生产环境请 sudo kunxtier install 注册系统服务",
     )
 }
 
@@ -159,7 +142,7 @@ impl UpArgs {
             core: self.core.clone(),
             fingerprint: self.fingerprint.clone(),
         };
-        let state_dir = node_global(self.state_dir)?.state_dir;
+        let state_dir = node_global()?.state_dir;
         let resp = call_daemon(&state_dir, req)?;
         match resp {
             IpcResponse {
@@ -180,7 +163,7 @@ impl UpArgs {
 
 impl DownArgs {
     pub fn execute(self) -> Result<(), Fail> {
-        let state_dir = node_global(self.state_dir)?.state_dir;
+        let state_dir = node_global()?.state_dir;
         let resp = call_daemon(&state_dir, IpcRequest::Down)?;
         match resp {
             IpcResponse { ok: true, .. } => println!("已断开 (daemon 留守, 身份保留)"),
@@ -201,7 +184,7 @@ impl StatusArgs {
         } else {
             IpcRequest::Status
         };
-        let state_dir = node_global(self.state_dir)?.state_dir;
+        let state_dir = node_global()?.state_dir;
         let resp = call_daemon(&state_dir, req)?;
         match resp {
             IpcResponse {
@@ -299,7 +282,10 @@ mod tests {
         let e = kunxtier_node::Error::Io(std::io::Error::from(io::ErrorKind::PermissionDenied));
         let msg = daemon_start_fail(e).to_string();
         assert!(msg.contains("sudo"), "应包含提权指引: {msg}");
-        assert!(msg.contains("--state-dir"), "应包含本地开发出路: {msg}");
+        assert!(
+            msg.contains("KUNXTIER_STATE_DIR"),
+            "应包含本地开发出路: {msg}"
+        );
         assert!(msg.contains("install"), "应包含服务化出路: {msg}");
     }
 
@@ -309,16 +295,5 @@ mod tests {
         let msg = daemon_start_fail(e).to_string();
         assert!(msg.contains("daemon 退出"), "保留原语境: {msg}");
         assert!(!msg.contains("sudo"));
-    }
-
-    #[test]
-    fn empty_state_dir_treated_as_unset() {
-        // 空 env 经 clap 折叠为 Some(""), 必须归一回 "未设置" 语义
-        assert!(normalize_state_dir(None).is_none());
-        assert!(normalize_state_dir(Some(PathBuf::from(""))).is_none());
-        assert_eq!(
-            normalize_state_dir(Some(PathBuf::from("./x"))),
-            Some(PathBuf::from("./x"))
-        );
     }
 }

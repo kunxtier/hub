@@ -38,13 +38,13 @@
 公网核心初始化:
 
 ```sh
-kunxtier relay --init --listen 0.0.0.0:443 --data-dir /var/lib/kunxtier
-# 记录指纹与 admin 凭证后启动 (生产以 systemd 托管, 见 P3)
+KUNXTIER_LISTEN=0.0.0.0:443 KUNXTIER_DATA_DIR=/var/lib/kunxtier kunxtier relay
+# 首启自动初始化, 记录指纹与 admin 凭证 (生产以 systemd 托管, 见 P3)
 ```
 
 ## P1 核心中继公网部署 (manual-verification T01)
 
-1. `relay --init` 校验 state 权限 0600 与默认网络组
+1. 首启自动初始化; 校验 state 权限 0600 与默认网络组
 2. 以 443 启动, 从外部机器确认管理 API / 信令 / 控制台页面可达
 3. 校验: `kunxtier admin --server https://<R>:443 ...` 自外网可用; 浏览器打开 `https://<R>` 可登录
 
@@ -77,7 +77,7 @@ kunxtier relay --init --listen 0.0.0.0:443 --data-dir /var/lib/kunxtier
 
 ## P4 备份跨机恢复与 schema 升级 (manual-verification T01)
 
-1. R: `kunxtier relay --data-dir /var/lib/kunxtier backup ./backup.sqlite` (或既有备份机制导出)
+1. R: `KUNXTIER_DATA_DIR=/var/lib/kunxtier kunxtier relay backup ./backup.sqlite` (或既有备份机制导出)
 2. 将备份恢复到新 VPS (同版本二进制) 并启动, 原节点免令牌重连
 3. (具备旧版本产物时) 用旧 schema 数据库起新版二进制
 
@@ -90,8 +90,8 @@ kunxtier relay --init --listen 0.0.0.0:443 --data-dir /var/lib/kunxtier
 
 ```sh
 # S (独立公网机器)
-KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core <R>:443 \
-  --fingerprint <fp> --advertise <S 对外地址>:443
+KUNXTIER_RELAY_TOKEN=<relay-token> KUNXTIER_CORE=<R>:443 \
+  KUNXTIER_FINGERPRINT=<fp> KUNXTIER_ADVERTISE=<S 对外地址>:443 kunxtier relay
 ```
 
 1. 指纹校验: 用错误指纹起卫星

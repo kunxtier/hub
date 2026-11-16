@@ -780,7 +780,7 @@ pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
     let store = Store::open(&cfg.db_path())?;
     // 内置转发条目: 公布地址 + 自身证书指纹 (节点按条目固定校验)
     let cert_pem = std::fs::read_to_string(cfg.cert_path())
-        .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;
+        .map_err(|e| Error::Cert(format!("加载证书失败 ({}): {e}", cfg.cert_path().display())))?;
     let fingerprint = cert::fingerprint(&cert::der_from_pem(&cert_pem)?);
     let builtin_addr = cfg.builtin_addr();
     if builtin_addr.is_none() {
@@ -797,7 +797,7 @@ pub async fn run(cfg: &RelayConfig) -> crate::Result<()> {
     ));
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cfg.cert_path(), cfg.key_path())
         .await
-        .map_err(|e| Error::Cert(format!("加载证书失败 (请先执行 relay --init): {e}")))?;
+        .map_err(|e| Error::Cert(format!("加载证书或私钥失败: {e}")))?;
     let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
     tracing::info!(listen = %cfg.listen, "核心中继启动");
     axum_server::bind_rustls(cfg.listen, tls)

@@ -19,7 +19,7 @@ kunxtier 是自研轻量 P2P 虚拟组网工具, 定位 ZeroTier / EasyTier 平�
 ┌──────┴──────────┐      ┌────────┴─────────────────────┐
 │ 卫星中继 (可选)   │      │ 节点 daemon (macOS/Linux/Win) │
 │ relay            │      │ 相互 WireGuard UDP 直连       │
-│  --satellite     │      │ (默认自动策略)                │
+│ 令牌 env 即卫星   │      │ (默认自动策略)                │
 │ 纯转发/零知识/    │      └──────────────────────────────┘
 │ 无管理权/无存储   │
 └──────┬──────────┘
@@ -61,11 +61,11 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 
 ## 关键流程
 
-1. 开网: `relay --init` 创建默认网络组, `admin network create` 按需另建; 每网独立成员表与 /16 地址段
+1. 开网: 首次 `kunxtier relay` 启动自动初始化并创建默认网络组, `admin network create` 按需另建; 每网独立成员表与 /16 地址段
 2. 注册: `up --token` → 节点生成 WG 密钥对 → REST 注册公钥 → 核心中继校验令牌 (含网络绑定)、记录属主、在该网络段内分配 /32、签发节点凭证 (仅存哈希) → 节点写入 state, 令牌失效
 3. 上线: daemon 以节点凭证完成挑战应答, 建立信令 WS → 上报候选地址 (STUN 探测结果与本机地址) → 核心中继推送本网络节点表 (含对端公钥)、中继列表与路径策略
 4. 连接: 自动策略下按节点表配置 WG peer → 信令互换候选地址 → 并发 UDP 打洞 → 成功切直连; 超时回落中继 (核心内置或卫星)。强制中继策略下跳过打洞, 直接经中继交换 WG 密文帧
-5. 卫星注册: `kunxtier relay --satellite --core <addr>` 以 relay 令牌注册 (卫星不感知网络概念) → 核心更新中继列表并分发给全部网络 → 节点按列表连接卫星
+5. 卫星注册: 设 `KUNXTIER_RELAY_TOKEN` 后执行 `kunxtier relay` 以该令牌注册 (令牌非空即卫星模式; 核心地址 / 指纹走 env 或 relay.toml; 卫星不感知网络概念) → 核心更新中继列表并分发给全部网络 → 节点按列表连接卫星
 6. 控制台接入: 浏览器直开核心中继托管的页面, 或在任意机器 `kunxtier console --relay <addr>` 起本地控制台; 两者同一套静态资源与 admin API, 行为等价, 均含网络组切换
 7. 恢复与维持: 直连与中继链路按保活策略维持 (persistent keepalive 与 WS 心跳); 周期性重试直连; 信令断线自动重连; 核心中继重启不要求节点与卫星重启; 卫星断连即从列表摘除
 
@@ -103,7 +103,7 @@ web/kunxtier-console/        # 前端源码, 构建产物交付嵌入
 
 daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-11), 目标是服务与 CLI 对同一份机器级配置和存储位置达成一致, 不依赖调用时的工作目录。
 
-- 全局配置: NodeGlobalConfig 承载机器级配置文件 (macOS / Linux 统一 /etc/kunxtier/config.toml, Windows 随平台切片), 字段 state_dir / log_dir / log_level, 全部非敏感; 落 kunxtier-core, 沿用 FileConfig + resolve 集中合并惯例, 分层 CLI > ENV > CONFIG > DEFAULT, 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 统一读取; daemon 以平台默认目录形态首启且文件缺失时就地生成默认模板 (同 install), 非 root 启动的权限失败映射 sudo / --state-dir / install 指引; relay 的 relay.toml 分层维持独立, 是否并入机器级配置留独立切片评估
+- 全局配置: NodeGlobalConfig 承载机器级配置文件 (macOS / Linux 统一 /etc/kunxtier/config.toml, Windows 随平台切片), 字段 state_dir / log_dir / log_level, 全部非敏感; 落 kunxtier-core, 沿用 FileConfig + resolve 集中合并惯例, 分层 ENV > CONFIG > DEFAULT (2026-11-06 反转, --state-dir flag 移除, KUNXTIER_STATE_DIR 接管), 文件缺失全默认、非法值即时报错; daemon / up / down / status / install / uninstall 统一读取; daemon 以平台默认目录形态首启且文件缺失时就地生成默认模板 (同 install), 非 root 启动的权限失败映射 sudo / KUNXTIER_STATE_DIR / install 指引; relay 的 relay.toml 为固定路径 /etc/kunxtier/relay.toml 自动发现, 与节点全局配置同目录不合并 (2026-11-06 决策)
 - 目录布局: state 目录由 CWD 相对默认改为平台固定 (unix 统一 /var/lib/kunxtier), 日志统一 unix 应用子目录 /var/log/kunxtier; 2026-10-27 布局修订: macOS 弃用 /Library/Application Support 与配置同置布局 (ZeroTier 先例废弃), 与 Linux 统一 (OPT-kunxtier-node-unix-layout)
 - 服务注册: macOS 为 root LaunchDaemon (/Library/LaunchDaemons/com.kunxtier.daemon.plist, RunAtLoad + KeepAlive, 经 launchctl bootstrap / bootout 管理); Linux 为 systemd 系统单元 (/etc/systemd/system/kunxtier.service, network-online 之后启动, Restart=on-failure); 服务定义只固化二进制绝对路径与 --log-file (install 时按全局配置解析日志位置), state_dir 不进单元, 运行时读全局配置保持单一事实源; Windows 注册随平台切片
 - install / uninstall: install 校验提权 (非 root 报错并给 sudo 提示), 全局配置缺失则以默认值显式生成 (0644), 确保 state / log 目录与权限就绪, 注册并启动, 幂等; uninstall 停服并删除服务定义, state 与全局配置保留
@@ -124,7 +124,7 @@ daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-
 - 节点身份双凭证: WireGuard 私钥 (数据面, 不离机) 与节点凭证 (信令面, 注册时签发、仅存哈希、挑战应答校验) 分离, 吊销即断
 - 控制面极简: 单核心中继 + SQLite, 不引入外部数据库与消息队列
 - monorepo 自包含: 本项目横跨 rust/kunxtier 与 web/kunxtier-console 两个语言目录, 拆仓时一起迁出 (见 arch-structure.md)
-- 配置分层遵循 CLI > ENV > CONFIG > DEFAULT, 敏感字段只出现在 env / 独立文件
+- 配置分层遵循 ENV > CONFIG > DEFAULT (CLI 只承载一次性动作参数), 敏感字段只出现在 env / 独立文件
 
 ## 取舍与风险
 
@@ -143,7 +143,7 @@ daemon 服务化与节点侧全局配置 (需求见 feat-kunxtier-cli FR-9 / FR-
 | 打洞成功率 | 不追求 100%, 策略可强制中继 | 对称 NAT 等场景依赖中继, 属设计内行为; 强制中继覆盖出口不稳定场景 |
 | 排障事件: daemon 内存事件环 vs 解析日志文件 | 内存事件环 | status --verbose 免文件解析、内存有界、IPC 直取; 代价是进程重启即清零, 历史回看仍依赖日志文件 |
 | daemon 日志默认 stderr vs 默认写文件 | 默认 stderr, `--log-file` 显式启用 | 免自行维护轮转; 服务化后由 install 固化 `--log-file` 到平台日志目录, journal 退为 Linux 旁路; 代价是手动后台运行时需显式开文件或自行重定向 |
-| 节点存储目录: 平台固定 (全局配置可改) vs CWD 相对默认 | 平台固定 | 服务与 CLI 免传参对齐, 服务拉起不再依赖工作目录; 代价是本地开发需显式 --state-dir |
+| 节点存储目录: 平台固定 (全局配置可改) vs CWD 相对默认 | 平台固定 | 服务与 CLI 免传参对齐, 服务拉起不再依赖工作目录; 代价是本地开发需设 KUNXTIER_STATE_DIR |
 | macOS 机器布局: /Library/Application Support (ZeroTier 先例) vs unix 统一 /etc + /var | 统一 unix 布局 (2026-10-27 修订) | 终端应用 + 特权服务气质一致, 两平台一套心智; 代价是弃 Finder 可达性与 ZeroTier 先例依据 |
 | IPC socket 0666 vs 管理组 0660 | 0666 (本机用户信任域) | 服务 root 形态下普通用户可用 up / down / status, 规避跨平台组语义差异; 代价是本机任意用户可断开会话 (up 仍需令牌) |
 | 服务单元固化 --log-file vs 运行时探测服务形态 | install 时固化 | 单元自描述、无形态探测魔法; 代价是改 log_dir 后需重跑 install 再生成单元 |

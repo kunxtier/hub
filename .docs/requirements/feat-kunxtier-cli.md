@@ -63,6 +63,7 @@ KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay   # relay 令牌存在即卫�
 
 # ── 配置感知 ──────────────────────────────────────────────────
 kunxtier config                                  # 显示本机配置文件位置 (relay.toml / 全局 config.toml) 并打印生效配置 (env > 文件 > 默认合并终值, 敏感字段脱敏)
+kunxtier config init [--relay|--node]            # 生成缺失的默认配置模板 (缺省两域; 已存在不改写; 写 /etc 需 root)
 
 # ── 控制台 (可选, 无状态, 随处可起) ───────────────────────────
 kunxtier console --relay wss://core.example.com  # 本机起控制台, 与直开核心页面行为等价
@@ -122,7 +123,7 @@ kunxtier admin relay status                           # 卫星中继注册状态
 | FR-9 | daemon 服务化: install / uninstall 注册系统服务 (macOS launchd / Linux systemd) 与开机自启 | 系统重启后 daemon 自动恢复并上线; uninstall 停服并清理服务定义, state 与全局配置保留; 三平台特权要求 (Windows 管理员 / macOS root / Linux root) 在文档与安装提示中明确 |
 | FR-10 | 数据与状态可迁移可备份: SQLite 带 schema 版本并只做前向迁移; 节点 state 文件带版本字段; `relay backup` 导出一致性备份 | 新版本二进制打开旧库自动迁移不丢数据; 备份文件可在新机恢复出完整网络状态 |
 | FR-11 | 节点侧机器级全局配置承载 state_dir / log_dir / log_level (见 "全局配置与目录布局") | 配置缺失全默认可用; install / daemon / up / down / status 读取一致; 优先级与非法值拒绝行为有单元测试覆盖 |
-| FR-12 | `kunxtier config` 配置感知: 显示本机各域配置文件位置 (relay.toml / 全局 config.toml) 并打印生效配置 (env > 文件 > 默认合并终值) | 位置与合并终值与实际运行行为一致; 敏感字段 (令牌 / 凭证 / 私钥) 脱敏输出 |
+| FR-12 | `kunxtier config` 配置感知: 显示本机各域配置文件位置 (relay.toml / 全局 config.toml) 并打印生效配置 (env > 文件 > 默认合并终值); `config init [--relay|--node]` 生成缺失域的默认模板 | 位置与合并终值与实际运行行为一致; 敏感字段 (令牌 / 凭证 / 私钥) 脱敏输出; init 只生成不修改既有文件 (0644) |
 
 ## 边界与约束
 

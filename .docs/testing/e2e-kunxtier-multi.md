@@ -27,27 +27,27 @@
 
 | 项目 | 值 |
 | ---- | --- |
-| 核心中继 R | Linux 实机或虚拟机, `kunxtier relay --listen 0.0.0.0:9443 --data-dir ./kunxtier-state`, 机内地址如 192.168.1.10:9443 |
+| 核心中继 R | Linux 实机或虚拟机, `KUNXTIER_LISTEN=0.0.0.0:9443 KUNXTIER_DATA_DIR=./kunxtier-state kunxtier relay`, 机内地址如 192.168.1.10:9443 |
 | 客户端 A | macOS (本机), daemon + CLI |
 | 客户端 B | Linux (实机或虚拟机), daemon + CLI |
 | 客户端 C (可选) | Linux, iptables / nftables 限制仅允许与 R 通信 |
-| 卫星 (可选) | 独立机器一个 `relay --satellite`; 无独立机器时用 R 同机第二进程 (仅验证协议, 不验证隔离) |
-| 产物 | 各平台按仓库构建流程产出对应二进制; A / B / C 均需 sudo |
+| 卫星 (可选) | 独立机器一个卫星实例 (令牌 env 形态); 无独立机器时用 R 同机第二进程 (仅验证协议, 不验证隔离) |
+| 产物 | 各平台按仓库构建流程产出对应二进制; A / B / C 的 daemon 需 sudo (TUN), up / status / down 经 IPC 免 sudo |
 
 各客户端首次注册统一形态:
 
 ```sh
-sudo kunxtier up --token <tok> --name <a|b|c> --core 192.168.1.10:9443 --fingerprint <fp> --state-dir ./kunxtier-node-state
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier up --token <tok> --name <a|b|c> --core 192.168.1.10:9443 --fingerprint <fp>
 ```
 
 ## M1 前置链路确认
 
-- R 侧按单机文档 S1-S2 完成 init 与管理链路; A / B 各自 `up` 成功, `status` 互见
+- R 侧按单机文档 S1-S2 完成首启初始化与管理链路; A / B 各自 `up` 成功, `status` 互见
 - 预期: A `status` 对端表含 b, B 对端表含 a
 
 ## M2 双节点互通与状态一致性
 
-1. A: `ping <B 虚拟 IP>` 持续 60 秒, 期间反复 `sudo kunxtier status --state-dir ...`
+1. A: `ping <B 虚拟 IP>` 持续 60 秒, 期间反复 `KUNXTIER_STATE_DIR=... kunxtier status`
 2. B: `kunxtier down` 后观察 A
 
 预期:
@@ -109,8 +109,9 @@ sudo iptables -P OUTPUT DROP
 
 ```sh
 # 卫星 (独立机器或 R 同机第二进程, 后者仅验证协议)
-KUNXTIER_RELAY_TOKEN=<relay-token> kunxtier relay --satellite --core 192.168.1.10:9443 \
-  --fingerprint <fp> --advertise <卫星对外地址>:<端口> --listen 0.0.0.0:<端口>
+KUNXTIER_RELAY_TOKEN=<relay-token> KUNXTIER_CORE=192.168.1.10:9443 \
+  KUNXTIER_FINGERPRINT=<fp> KUNXTIER_ADVERTISE=<卫星对外地址>:<端口> \
+  KUNXTIER_LISTEN=0.0.0.0:<端口> kunxtier relay
 ```
 
 1. 卫星注册后, 观察 A 的 `status --verbose` (中继列表分发)

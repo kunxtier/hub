@@ -84,7 +84,7 @@ impl Store {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() && !dir.exists() {
                 return Err(Error::Usage(format!(
-                    "数据目录不存在: {}; 请先执行 kunxtier relay --init 初始化",
+                    "数据目录不存在: {}; 请先运行 kunxtier relay 完成首次初始化",
                     dir.display()
                 )));
             }
@@ -878,7 +878,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("数据目录不存在"), "实际: {msg}");
-        assert!(msg.contains("relay --init"), "实际: {msg}");
+        assert!(msg.contains("kunxtier relay"), "实际: {msg}");
     }
 
     #[test]

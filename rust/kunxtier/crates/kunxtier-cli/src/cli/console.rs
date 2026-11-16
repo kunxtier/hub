@@ -17,7 +17,7 @@ pub struct ConsoleArgs {
     /// 核心中继地址 host:port
     #[arg(long, env = "KUNXTIER_CORE")]
     pub relay: String,
-    /// 核心证书指纹 hex (relay --init 输出)
+    /// 核心证书指纹 hex (首次 relay 启动的初始化输出)
     #[arg(long, env = "KUNXTIER_FINGERPRINT")]
     pub fingerprint: String,
     /// 本地监听地址 (缺省 127.0.0.1:7600)

@@ -28,6 +28,7 @@
 | 卫星模式判定 | `relay.rs` 装配 | `KUNXTIER_RELAY_TOKEN` 存在即卫星, 缺失即核心; 冲突校验 (核心模式出现该 env 应报错还是忽略, 实现期定并落注释) |
 | 优先级反转 | `config.rs` `pick`/`resolve` | `cli_v.or(env).or(file)` 改 `env.or(file).or(default)`; `--state-dir` flag 从 daemon/up/down/status/install 摘除, `KUNXTIER_STATE_DIR` 接管; FR-7 相关单测改写 |
 | config 子命令 | `kunxtier-cli/src/cli/config.rs` 新建 | 输出: 各域配置文件路径 (存在与否) + 生效配置终值 (env > 文件 > 默认合并结果); 敏感字段 (令牌/凭证/私钥路径内容) 脱敏为存在性提示 |
+| config init 子命令 | `cli/config.rs` + `core/config.rs` | `config init [--relay/--node]` (缺省两域) 生成缺失域默认模板 (0644, 只生成不修改); `FileConfig` 补 `render_default`/`load_or_default`/`ensure_written` 与节点域同构; relay 域维持不自动落盘 (巡检命令不携带 /etc 副作用写), 缺失时裸 config 输出生成入口提示 |
 | IPC 免 sudo | `kunxtier-node/src` state/socket 权限 | 按 feat-kunxtier-cli 承诺落地: 服务形态目录 0755 / 身份文件 0600 / socket 0666, 已登录用户可执行 up/down/status; 现实现 0700 目录偏离该承诺 |
 | 文档同步 | CLAUDE.md, e2e S1/S4/S5 | 命令面全部换 env 形态; `make dev` 流程核对 |
 | 架构文档 | `impl-kunxtier-runtime-layout.md`, `arch-kunxtier-overview.md`, `arch-structure.md` | impl 的 relay.toml 经 `--config` 指定与 `--log-file`/`--state-dir` 描述、overview 的 "CLI > ENV > CONFIG" 分层与 `--state-dir` 取舍条目、structure 的 `--satellite` 树注释, 均按目标形态改写; 历史演进记录只追加 |
@@ -56,3 +57,11 @@
 - `kunxtier config` 输出 relay/node 两域文件位置与合并终值, 令牌类字段只显示 "已设置/未设置"
 - daemon 全生命周期命令无 --state-dir; `KUNXTIER_STATE_DIR` 驱动; FR-7 单测按 env > file > default 通过
 - 非 root 用户可执行 status/down (socket 0666 生效), 私钥仍 0600
+
+## 实施记录 (2026-11-09)
+
+- T01/T02: relay 8 个配置类 flag 拆除; 两个实现期裁决——`--log-level`/`--log-file` 判定为进程级观测参数予以保留 (与 daemon 对称, install 服务定义固化 `--log-file` 的口径不变); 卫星冲突不做校验, 各模式只读各自字段 (`KUNXTIER_CORE`/`KUNXTIER_FINGERPRINT` 与 up/admin/console 共用, 属环境固有变量), 判定收口 `config::satellite_mode`
+- T03: `kunxtier config` 落地; 报告生成 `render` 注入 env/文件层可测, 令牌/凭证只输出存在性
+- T04: 核验通过, 无代码变更——0755 目录 / 0600 身份文件 / 0666 socket 已由 e0af418 (T14 服务化切片) 先行落地并带测试断言, 本 issue 撰写时的 "0700 偏离" 为过期快照
+- T05: 文档同步扩至全部 4 份 testing 文档 (multi / public / network 的旧命令形态随单机文档同批换), 超出范围表点名的 "e2e S1/S4/S5"——依据风险节 "e2e/开发流程全部改 env" 的整批落地约束
+- T06 (人工审核反馈追加): relay.toml 此前不存在任何生成路径 (节点 config.toml 有 daemon 首启 / install 自动生成, 两域不对称)——`config init [--relay/--node]` 补显式入口; 裸 config 保持只读 (巡检命令不携带 /etc 副作用写, 否则免特权查看变特权命令); 不引入 relay 首启自动落盘 (非 root 本地实例会失败, 需 env 覆盖判定门槛, 复杂度不值)

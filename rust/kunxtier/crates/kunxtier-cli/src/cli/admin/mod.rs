@@ -64,7 +64,7 @@ impl AdminCommand {
             .ok_or_else(|| {
                 Fail::usage(
                     "缺少 admin 凭证: 请设置环境变量 KUNXTIER_ADMIN \
-                     (见 relay --init 输出, 或 state 目录 admin-credential 文件)",
+                     (见首次 relay 启动的初始化输出, 或 state 目录 admin-credential 文件)",
                 )
             })?;
         let remote = AdminRemote::new(&self.server, &self.fingerprint, &credential);

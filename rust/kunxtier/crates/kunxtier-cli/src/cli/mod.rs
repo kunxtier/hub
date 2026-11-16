@@ -4,6 +4,7 @@
 //! Created: 2026-10-21
 
 pub mod admin;
+mod config;
 mod console;
 pub mod error;
 mod install;
@@ -15,6 +16,7 @@ use kunxtier_core::config::NodeGlobalConfig;
 
 use crate::logging::LogSpec;
 pub use admin::AdminCommand;
+pub use config::ConfigArgs;
 pub use console::ConsoleArgs;
 use error::Fail;
 pub use install::{InstallArgs, UninstallArgs};
@@ -34,7 +36,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// 运行核心中继 (管理 + 登记); --init 初始化状态目录; --satellite 起纯转发卫星
+    /// 运行中继: 默认核心模式, KUNXTIER_RELAY_TOKEN 非空时为卫星模式 (配置走 env 与 relay.toml)
     Relay(RelayCommand),
     /// 管理操作; admin 凭证走 env KUNXTIER_ADMIN
     Admin(AdminCommand),
@@ -48,6 +50,8 @@ pub enum Command {
     Status(StatusArgs),
     /// 本地起 Web 控制台 (托管页面并反代核心 admin API)
     Console(ConsoleArgs),
+    /// 配置感知: 位置与生效配置打印 (敏感脱敏); init 子命令生成缺失的默认模板
+    Config(ConfigArgs),
     /// 注册系统服务与开机自启 (首次生成全局配置; 需 root)
     Install(InstallArgs),
     /// 停服并移除系统服务注册 (state 与全局配置保留)
@@ -61,10 +65,9 @@ impl Command {
         match self {
             Command::Relay(cmd) => cmd.log_spec(),
             Command::Daemon(args) => {
-                let config_level =
-                    NodeGlobalConfig::load(args.state_dir.clone(), |k| std::env::var(k).ok())
-                        .ok()
-                        .and_then(|c| c.log_level);
+                let config_level = NodeGlobalConfig::load(|k| std::env::var(k).ok())
+                    .ok()
+                    .and_then(|c| c.log_level);
                 (
                     LogSpec {
                         level: args.log_level.clone(),
@@ -86,6 +89,7 @@ impl Command {
             Command::Down(cmd) => cmd.execute(),
             Command::Status(cmd) => cmd.execute(),
             Command::Console(cmd) => cmd.execute(),
+            Command::Config(cmd) => cmd.execute(),
             Command::Install(cmd) => cmd.execute(),
             Command::Uninstall(cmd) => cmd.execute(),
         }

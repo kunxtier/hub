@@ -70,25 +70,19 @@ args = ["test", "--workspace"]
 
 # ---- 运行 ----
 # admin 操作不设任务: 凭证只走环境变量 KUNXTIER_ADMIN, 不落任何文件。
-# 手动示例 (指纹来自 relay-init 任务输出):
+# 手动示例 (指纹来自首次 relay 启动的自动初始化输出):
 #   KUNXTIER_ADMIN=kxt_admin_xxx cargo run -p kunxtier-cli --bin kunxtier -- \
 #     admin --server https://127.0.0.1:9443 --fingerprint <指纹> network list
 
-[tasks.relay-init]
-category = "运行"
-description = "初始化状态目录 (证书 / admin 凭证 / 默认网络; 明文凭证仅展示一次)"
-command = "cargo"
-args = ["run", "-p", "kunxtier-cli", "--bin", "kunxtier", "--", "relay", "--init"]
-
 [tasks.relay-run]
 category = "运行"
-description = "启动核心中继 (KUNXTIER_LISTEN / KUNXTIER_DATA_DIR 可覆盖)"
+description = "启动核心中继 (首启自动初始化; KUNXTIER_LISTEN / KUNXTIER_DATA_DIR 可覆盖)"
 command = "cargo"
 args = ["run", "-p", "kunxtier-cli", "--bin", "kunxtier", "--", "relay"]
 
 [tasks.relay-watch]
 category = "运行"
-description = "热编译: 源码变更自动重建并重启核心中继 (前置: relay-init; cargo install cargo-watch)"
+description = "热编译: 源码变更自动重建并重启核心中继 (首启自动初始化; 监听/目录经 KUNXTIER_LISTEN / KUNXTIER_DATA_DIR 覆盖; 需 cargo install cargo-watch)"
 command = "cargo"
 args = ["watch", "--clear", "-x", "run -p kunxtier-cli --bin kunxtier -- relay"]
 

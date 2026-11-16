@@ -32,19 +32,19 @@
 | 工作目录 | 独立目录 (如 `~/kunxtier-verify`), 严禁在仓库内落 state |
 | 端口 | relay 127.0.0.1:9443 (高位端口避免 443 特权); console 本地入口缺省 127.0.0.1:7600 |
 | 特权 | daemon / up / install 需要 sudo (TUN: macOS utun 需 root, Linux 需 CAP_NET_ADMIN) |
-| 凭证 | 指纹与 admin 凭证来自 `relay --init` 输出; admin 凭证亦落 `state/admin-credential` |
+| 凭证 | 指纹与 admin 凭证来自首次 relay 启动的自动初始化输出; admin 凭证亦落 `state/admin-credential` |
 
-约定记号: `<fp>` 为核心证书指纹 (init 输出, 或由 `kunxtier-state/cert.pem` 重算), 一次性令牌 / relay 令牌按签发输出记录; admin 凭证经 `KUNXTIER_ADMIN` 环境变量注入, 取值 `kunxtier-state/admin-credential`。
+约定记号: `<fp>` 为核心证书指纹 (首启自动初始化输出, 或由 `kunxtier-state/cert.pem` 重算), 一次性令牌 / relay 令牌按签发输出记录; admin 凭证经 `KUNXTIER_ADMIN` 环境变量注入, 取值 `kunxtier-state/admin-credential`。
 
 ## S1 relay 初始化与启动
 
 ```sh
-kunxtier relay --init --listen 127.0.0.1:9443 --data-dir ./kunxtier-state
+KUNXTIER_LISTEN=127.0.0.1:9443 KUNXTIER_DATA_DIR=./kunxtier-state kunxtier relay
 ```
 
-- 预期: 生成 state 目录 (0700), 自签证书与 admin 凭证明文仅展示一次; 默认网络组已创建; 私钥与 admin 凭证 0600 (SQLite 文件未单独设权, 由 0700 目录兜底)
-- 记录 `<fp>` 与 `$ADMIN`
-- 启动: `kunxtier relay --listen 127.0.0.1:9443 --data-dir ./kunxtier-state` 前台常驻 (验证期间保持运行)
+- 预期: 首启自动完成初始化: 生成 state 目录 (0700), 自签证书与 admin 凭证明文仅在终端 (tty) 展示一次; 默认网络组已创建; 私钥与 admin 凭证 0600 (SQLite 文件未单独设权, 由 0700 目录兜底)
+- 记录 `<fp>` 与 `$ADMIN`, 前台常驻 (验证期间保持运行); 后续重启同命令直接进入运行态, 不再重复初始化
+- 附带核验: `kunxtier relay --listen 127.0.0.1:9443` 应报 "不支持的参数" (零配置类 flag, 配置只走 env 与 /etc/kunxtier/relay.toml)
 
 ## S2 管理链路走查 (manual-verification T04 主体)
 
@@ -73,24 +73,24 @@ cd rust/kunxtier && sudo cargo test -p kunxtier-node -- --ignored
 ## S4 daemon 启动
 
 ```sh
-sudo kunxtier daemon --state-dir ./kunxtier-node-state
+sudo KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier daemon
 ```
 
-- 预期: 前台启动, 日志装配正常; 不带 sudo 运行应得到 EACCES 映射的提权指引 (sudo / --state-dir / install), 而非裸 io 错误
+- 预期: 前台启动, 日志装配正常; 不带 sudo 运行应得到 EACCES 映射的提权指引 (sudo / KUNXTIER_STATE_DIR / install), 而非裸 io 错误
 
 ## S5 注册闭环 (up / status / down / 重连)
 
-另开终端:
+另开终端 (普通用户即可, IPC socket 0666):
 
 ```sh
-sudo kunxtier up --token <一次性令牌> --name solo --core 127.0.0.1:9443 --fingerprint <fp> --state-dir ./kunxtier-node-state
-sudo kunxtier status --state-dir ./kunxtier-node-state
-sudo kunxtier status --verbose --state-dir ./kunxtier-node-state   # 排障视图: 注册 / 信令 / 路径事件留痕
-sudo kunxtier down --state-dir ./kunxtier-node-state
-sudo kunxtier up --state-dir ./kunxtier-node-state                 # 已注册节点免令牌以上次身份重连
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier up --token <一次性令牌> --name solo --core 127.0.0.1:9443 --fingerprint <fp>
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier status
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier status --verbose   # 排障视图: 注册 / 信令 / 路径事件留痕
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier down
+KUNXTIER_STATE_DIR=./kunxtier-node-state kunxtier up                 # 已注册节点免令牌以上次身份重连
 ```
 
-- 预期: 注册成功并分配 /32 虚拟 IP; status 显示本机与会话状态; verbose 含关键事件留痕; down 后 daemon 留守; 免令牌 up 以原身份恢复
+- 预期: 注册成功并分配 /32 虚拟 IP; status 显示本机与会话状态; verbose 含关键事件留痕; down 后 daemon 留守; 免令牌 up 以原身份恢复; up / status / down 以非 root 用户执行成功 (免 sudo)
 - daemon 未运行时执行 `kunxtier status` 应提示 daemon 未运行与启动方式, 不报晦涩错误
 
 ## S6 负向与治理场景
@@ -98,7 +98,7 @@ sudo kunxtier up --state-dir ./kunxtier-node-state                 # 已注册�
 | 场景 | 操作 | 预期 |
 | ---- | ---- | ---- |
 | 同令牌二次注册 | S5 令牌成功后再用同令牌 `up` | 被拒, 错误明确 |
-| 同名注册被拒 | 另一 state-dir 用 `--name solo` 注册 | 被拒, 提示名字冲突 |
+| 同名注册被拒 | 另一 state 目录 (KUNXTIER_STATE_DIR 指向新目录) 用 `--name solo` 注册 | 被拒, 提示名字冲突 |
 | 令牌撤销 | `admin token revoke <id>` 后 `up` | 被拒, 错误信息明确 |
 | 恶意指纹 | `--fingerprint` 改一位 hex 后 `up` | 连接被拒, 提示指纹不匹配 |
 | 节点移除后凭证失效 | `admin node remove --network default --name solo` 后观察 daemon | 信令被拒 (凭证已吊销), 网内流量停止 |
@@ -119,25 +119,25 @@ sudo kunxtier up --state-dir ./kunxtier-node-state                 # 已注册�
 
 ## S8 单机双 daemon 组网 (可选进阶)
 
-同机两个 daemon 实例 (各自 state-dir, 各自 utun / TUN 设备), 直连路径为回环量级, 验证控制面与转发面行为, 不代表真实 NAT 打洞:
+同机两个 daemon 实例 (各自 KUNXTIER_STATE_DIR, 各自 utun / TUN 设备), 直连路径为回环量级, 验证控制面与转发面行为, 不代表真实 NAT 打洞:
 
 ```sh
-sudo kunxtier daemon --state-dir ./node-a &
-sudo kunxtier daemon --state-dir ./node-b &
-sudo kunxtier up --token <tok-a> --name a --core 127.0.0.1:9443 --fingerprint <fp> --state-dir ./node-a
-sudo kunxtier up --token <tok-b> --name b --core 127.0.0.1:9443 --fingerprint <fp> --state-dir ./node-b
+sudo KUNXTIER_STATE_DIR=./node-a kunxtier daemon &
+sudo KUNXTIER_STATE_DIR=./node-b kunxtier daemon &
+KUNXTIER_STATE_DIR=./node-a kunxtier up --token <tok-a> --name a --core 127.0.0.1:9443 --fingerprint <fp>
+KUNXTIER_STATE_DIR=./node-b kunxtier up --token <tok-b> --name b --core 127.0.0.1:9443 --fingerprint <fp>
 sudo ping <b 虚拟 IP>        # 从 a 侧
-sudo kunxtier status --state-dir ./node-a   # 对端 b 路径
+KUNXTIER_STATE_DIR=./node-a kunxtier status   # 对端 b 路径
 ```
 
 | 场景 | 操作 | 预期 |
 | ---- | ---- | ---- |
 | 双节点互通 | a ping b | 通; status 路径显示一致 |
 | 节点下线秒级移除 | b `down` | a 的节点表秒级移除 b, ping 失败 |
-| 网络组隔离 | b 改用 net2 令牌重注册 (node-b 换新 state-dir) | 默认网令牌跨网注册被拒; a ping 不通 b; 控制台两网数据互不可见 |
+| 网络组隔离 | b 改用 net2 令牌重注册 (node-b 换新 state 目录) | 默认网令牌跨网注册被拒; a ping 不通 b; 控制台两网数据互不可见 |
 | 强制中继策略 | `admin node policy --network default --name a force_relay` | a 流量走中继, status 显示 relay; 改回 auto 恢复 |
 | 核心中继重启 | 重启 relay 进程 | 双节点自动重连, IP 不变, 互通恢复 |
-| 备份与恢复 | `kunxtier relay --data-dir ./kunxtier-state backup ./backup.sqlite` 后以新 data-dir 起第二个核心并用其注册新节点 | 网络组 / 用户 / 节点 / 令牌状态完整还原 |
+| 备份与恢复 | `KUNXTIER_DATA_DIR=./kunxtier-state kunxtier relay backup ./backup.sqlite` 后以新 data-dir 起第二个核心并用其注册新节点 | 网络组 / 用户 / 节点 / 令牌状态完整还原 |
 
 ## S9 本地网段冲突 (可选)
 
